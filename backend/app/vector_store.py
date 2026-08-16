@@ -10,6 +10,8 @@ import os
 import chromadb
 from langchain_core.documents import Document
 
+from .embeddings import embed_text
+
 COLLECTION_NAME = "employee_policies"
 CHROMA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
 
@@ -66,3 +68,39 @@ def index_chunks(chunks: list[Document], embeddings: list[list[float]]) -> int:
         metadatas=metadatas,
     )
     return len(ids)
+
+
+def search(query: str, top_k: int = 4) -> list[dict]:
+    """
+    Retrieves the top_k most relevant chunks for a query from the
+    persistent collection. Read-only: the index is not modified.
+
+    Args:
+        query (str): The user question to search for.
+        top_k (int): Number of results to return.
+
+    Returns:
+        list[dict]: Ranked records, each with "id", "text", "metadata",
+            and "distance".
+    """
+    query_embedding = embed_text(query)
+    results = _collection.query(
+        query_embeddings=[query_embedding],
+        n_results=top_k,
+        include=["documents", "metadatas", "distances"],
+    )
+
+    records = []
+    for record_id, text, metadata, distance in zip(
+        results["ids"][0],
+        results["documents"][0],
+        results["metadatas"][0],
+        results["distances"][0],
+    ):
+        records.append({
+            "id": record_id,
+            "text": text,
+            "metadata": metadata,
+            "distance": distance,
+        })
+    return records
