@@ -23,3 +23,17 @@ def embed_text(text: str) -> list[float]:
         list[float]: The embedding vector for the supplied text.
     """
     return _model.encode(text).tolist()
+
+
+def embed_texts(texts: list[str]) -> list[list[float]]:
+    """
+    Generates one embedding per input text in a single batched call.
+
+    Args:
+        texts (list[str]): The texts to embed (e.g., document chunks).
+
+    Returns:
+        list[list[float]]: One 384-dimensional embedding per input text,
+            in the same order as the inputs.
+    """
+    return _model.encode(texts).tolist()
