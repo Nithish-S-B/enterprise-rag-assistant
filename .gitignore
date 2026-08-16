@@ -52,6 +52,7 @@ logs/
 *.sqlite3
 .chroma/
 chroma_data/
+chroma_db/
 
 # OS
 Thumbs.db
