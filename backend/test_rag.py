@@ -15,18 +15,18 @@ def test_rag() -> bool:
     for question in QUESTIONS:
         result = answer_question(question, candidate_k=10, final_k=4)
         answer = result["answer"]
-        sources = result["sources"]
+        citations = result["citations"]
 
         assert answer.strip(), "Expected a non-empty generated answer."
-        assert sources, "Expected retrieved source information."
+        assert citations, "Expected citation information."
 
         print("\n" + "=" * 80)
         print(f"QUESTION: {question}")
-        print("RETRIEVED SOURCES:")
-        for source in sources:
+        print("CITATIONS:")
+        for citation in citations:
             print(
-                f"- source={source['source']} | page={source['page']} | "
-                f"chunk_id={source['chunk_id']}"
+                f"- {citation['citation_id']} | source={citation['source']} | "
+                f"page={citation['page_label']} | chunk_id={citation['chunk_id']}"
             )
         print("GENERATED ANSWER:")
         print(answer)

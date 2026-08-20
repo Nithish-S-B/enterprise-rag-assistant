@@ -1,4 +1,5 @@
 """Basic grounded RAG orchestration over retrieval, reranking, and generation."""
+from .citations import build_citations
 from .llm import generate_text
 from .reranker import rerank
 from .vector_store import search
@@ -14,28 +15,27 @@ says they are policy. Preserve distinctions such as \"may\", \"should\", and
 context, chunks, rankings, or other internal implementation details."""
 
 
-def _format_context(chunks: list[dict]) -> str:
+def _format_context(chunks: list[dict], citations: list[dict]) -> str:
     """Format reranked chunks as distinct evidence blocks for the LLM."""
     blocks = []
-    for index, chunk in enumerate(chunks, start=1):
-        metadata = chunk["metadata"]
+    for chunk, citation in zip(chunks, citations):
         blocks.append(
-            f"[CONTEXT {index}]\n"
-            f"Source: {metadata.get('source', 'Unknown')}\n"
-            f"Page: {metadata.get('page', 'Unknown')}\n"
-            f"Chunk ID: {chunk['id']}\n"
+            f"[CONTEXT {citation['citation_id']}]\n"
+            f"Source: {citation['source']}\n"
+            f"Page: {citation['page_label']}\n"
+            f"Chunk ID: {citation['chunk_id']}\n\n"
             f"Content:\n{chunk['text']}"
         )
     return "\n\n".join(blocks)
 
 
-def _build_prompt(question: str, chunks: list[dict]) -> str:
+def _build_prompt(question: str, chunks: list[dict], citations: list[dict]) -> str:
     """Build the complete grounded prompt for a single question."""
     return (
         "SYSTEM INSTRUCTIONS\n"
         f"{SYSTEM_INSTRUCTIONS}\n\n"
         "RETRIEVED CONTEXT\n"
-        f"{_format_context(chunks)}\n\n"
+        f"{_format_context(chunks, citations)}\n\n"
         "USER QUESTION\n"
         f"{question}"
     )
@@ -59,15 +59,8 @@ def answer_question(
 
     candidates = search(question, top_k=candidate_k)
     final_chunks = rerank(question, candidates, final_k=final_k)
-    prompt = _build_prompt(question, final_chunks)
+    citations = build_citations(final_chunks)
+    prompt = _build_prompt(question, final_chunks, citations)
     answer = generate_text(prompt)
 
-    sources = [
-        {
-            "source": chunk["metadata"].get("source", "Unknown"),
-            "page": chunk["metadata"].get("page", "Unknown"),
-            "chunk_id": chunk["id"],
-        }
-        for chunk in final_chunks
-    ]
-    return {"answer": answer, "sources": sources}
+    return {"answer": answer, "citations": citations}
