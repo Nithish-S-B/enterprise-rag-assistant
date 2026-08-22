@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from .api.chat import router as chat_router
+from .api.documents import router as documents_router
 from .api.health import router as health_router
 
 # Load environment variables
@@ -62,6 +63,7 @@ async def root():
 
 app.include_router(health_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+app.include_router(documents_router, prefix="/api/documents")
 
 @app.get("/config")
 async def get_config():
