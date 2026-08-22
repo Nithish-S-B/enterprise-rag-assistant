@@ -9,6 +9,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from .api.health import router as health_router
+
 # Load environment variables
 load_dotenv()
 
@@ -18,8 +20,11 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Enterprise RAG Assistant",
-    description="A multi-document RAG system for enterprise document analysis",
+    title="Enterprise Multi-Document RAG Assistant",
+    description=(
+        "Multi-document retrieval-augmented generation (RAG) API for "
+        "enterprise document analysis."
+    ),
     version="0.1.0"
 )
 
@@ -39,11 +44,6 @@ app.add_middleware(
 )
 
 # Pydantic models for API responses
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    environment: str
-
 class WelcomeResponse(BaseModel):
     message: str
     api_version: str
@@ -54,20 +54,12 @@ class WelcomeResponse(BaseModel):
 async def root():
     """Welcome endpoint"""
     return WelcomeResponse(
-        message="Welcome to Enterprise RAG Assistant",
+        message="Welcome to Enterprise Multi-Document RAG Assistant",
         api_version="0.1.0",
         documentation_url="/docs"
     )
 
-@app.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Health check endpoint"""
-    logger.info("Health check performed")
-    return HealthResponse(
-        status="healthy",
-        version="0.1.0",
-        environment=os.getenv("DEBUG", "False")
-    )
+app.include_router(health_router, prefix="/api")
 
 @app.get("/config")
 async def get_config():
@@ -94,7 +86,7 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "main:app",
+        "app.main:app",
         host="0.0.0.0",
         port=8000,
         reload=os.getenv("DEBUG", "False") == "True"
