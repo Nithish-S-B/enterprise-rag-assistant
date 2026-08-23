@@ -1,9 +1,17 @@
-"""Document upload endpoint with validation-only handling."""
+"""Document upload endpoint: validate, ingest, embed, and index PDFs."""
 import logging
 import os
+import re
+import tempfile
+from typing import Literal
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
+
+from ..chunker import chunk_documents
+from ..document_loader import load_pdf
+from ..embeddings import embed_texts
+from ..vector_store import index_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -14,15 +22,17 @@ BYTES_PER_MB = 1024 * 1024
 READ_CHUNK_SIZE_BYTES = 64 * 1024
 PDF_SIGNATURE = b"%PDF-"
 SUPPORTED_EXTENSION = ".pdf"
+TEMP_FILE_PREFIX = "rag_upload_"
 
 
-class UploadValidationResponse(BaseModel):
-    """Result of validating an uploaded PDF before any processing."""
+class UploadIngestionResponse(BaseModel):
+    """Summary of a successfully ingested and indexed PDF."""
 
+    document_id: str
     filename: str
-    size_bytes: int
-    content_type: str | None
-    message: str
+    pages: int
+    chunks: int
+    status: Literal["indexed"]
 
 
 def _max_upload_bytes() -> int:
@@ -40,9 +50,66 @@ def _max_upload_bytes() -> int:
     return max(1, megabytes) * BYTES_PER_MB
 
 
-@router.post("/upload", response_model=UploadValidationResponse)
-async def upload_document(file: UploadFile = File(...)) -> UploadValidationResponse:
-    """Validate an uploaded PDF without ingesting or persisting it."""
+def _build_document_id(filename: str) -> str:
+    """
+    Derives a stable, filesystem-safe identifier from the uploaded filename.
+
+    Example: "Employee Handbook.pdf" -> "employee_handbook"
+    """
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    normalized = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_")
+    return normalized or "document"
+
+
+def _ingest_pdf(temp_path: str, filename: str, document_id: str) -> tuple[int, int]:
+    """
+    Runs the existing load -> chunk -> embed -> index pipeline against a
+    temporary PDF file.
+
+    Returns:
+        tuple[int, int]: (page_count, chunk_count)
+
+    Raises:
+        HTTPException: With a safe, client-facing message when parsing,
+            chunking, embedding, or indexing fails.
+    """
+    try:
+        pages = load_pdf(temp_path)
+        if not pages:
+            raise ValueError("The PDF contains no readable pages.")
+
+        chunks = chunk_documents(pages)
+        if not chunks:
+            raise ValueError("The PDF contains no extractable text to index.")
+
+        # Index under the original filename so chunk IDs are deterministic
+        # across uploads (upserts replace prior records instead of duplicating).
+        for chunk in chunks:
+            chunk.metadata["source"] = filename
+            chunk.metadata["document_id"] = document_id
+
+        texts = [chunk.page_content for chunk in chunks]
+        embeddings = embed_texts(texts)
+        index_chunks(chunks, embeddings)
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.exception(
+            "Ingestion failed for uploaded PDF '%s' (document_id=%s).",
+            filename,
+            document_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to process the uploaded PDF.",
+        ) from error
+
+    return len(pages), len(chunks)
+
+
+@router.post("/upload", response_model=UploadIngestionResponse)
+async def upload_document(file: UploadFile = File(...)) -> UploadIngestionResponse:
+    """Validate an uploaded PDF, then ingest, embed, and index it."""
     filename = (file.filename or "").strip()
     if not filename:
         raise HTTPException(
@@ -87,10 +154,36 @@ async def upload_document(file: UploadFile = File(...)) -> UploadValidationRespo
             detail="File content does not look like a valid PDF document.",
         )
 
-    logger.info("Validated PDF upload '%s' (%d bytes).", filename, total_size)
-    return UploadValidationResponse(
+    document_id = _build_document_id(filename)
+    temp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=TEMP_FILE_PREFIX,
+            suffix=SUPPORTED_EXTENSION,
+            delete=False,
+        ) as handle:
+            temp_path = handle.name
+            handle.write(payload)
+
+        pages, chunk_count = _ingest_pdf(temp_path, filename, document_id)
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                logger.warning("Could not remove temporary file '%s'.", temp_path)
+
+    logger.info(
+        "Indexed PDF '%s' (document_id=%s, pages=%d, chunks=%d).",
+        filename,
+        document_id,
+        pages,
+        chunk_count,
+    )
+    return UploadIngestionResponse(
+        document_id=document_id,
         filename=filename,
-        size_bytes=total_size,
-        content_type=file.content_type,
-        message="PDF upload validated successfully.",
+        pages=pages,
+        chunks=chunk_count,
+        status="indexed",
     )
