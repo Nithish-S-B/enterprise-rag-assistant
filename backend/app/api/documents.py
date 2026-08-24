@@ -80,17 +80,45 @@ def _max_upload_bytes() -> int:
     return max(1, megabytes) * BYTES_PER_MB
 
 
+def _delete_existing_chunks_if_present(document_id: str) -> int:
+    """
+    Removes every indexed chunk of an existing logical document.
+
+    delete_document() remains the single source of truth for removing a
+    document's chunks; a first-time upload simply has nothing to remove,
+    so DocumentNotFoundError is the expected no-op signal here.
+    """
+    try:
+        return delete_document(document_id)
+    except DocumentNotFoundError:
+        return 0
+
+
 def _ingest_pdf(temp_path: str, filename: str, document_id: str) -> tuple[int, int]:
     """
-    Runs the existing load -> chunk -> embed -> index pipeline against a
-    temporary PDF file.
+    Runs the replacement-aware ingestion pipeline against a temporary PDF:
+
+        load -> chunk -> embed -> delete old chunks (if any) -> index new
+
+    All expensive, failure-prone processing happens BEFORE the destructive
+    deletion, so a corrupt or unreadable upload never damages the currently
+    indexed document. When the document_id already exists (same filename
+    normalization), the old representation is removed and replaced; the
+    final vector store state contains ONLY the latest chunks — stale
+    records from a previous, larger version cannot survive.
+
+    Consistency limitation: ChromaDB offers no transaction spanning the
+    delete and index calls. If indexing fails after the old chunks were
+    removed, the document is temporarily absent until a retry succeeds;
+    that failure is logged server-side and surfaced as a safe 500 rather
+    than silently pretending success.
 
     Returns:
         tuple[int, int]: (page_count, chunk_count)
 
     Raises:
         HTTPException: With a safe, client-facing message when parsing,
-            chunking, embedding, or indexing fails.
+            chunking, embedding, deletion, or indexing fails.
     """
     try:
         pages = load_pdf(temp_path)
@@ -102,14 +130,39 @@ def _ingest_pdf(temp_path: str, filename: str, document_id: str) -> tuple[int, i
             raise ValueError("The PDF contains no extractable text to index.")
 
         # Index under the original filename so chunk IDs are deterministic
-        # across uploads (upserts replace prior records instead of duplicating).
+        # across uploads (re-indexing replaces same-ID records).
         for chunk in chunks:
             chunk.metadata["source"] = filename
             chunk.metadata["document_id"] = document_id
 
         texts = [chunk.page_content for chunk in chunks]
         embeddings = embed_texts(texts)
-        index_chunks(chunks, embeddings)
+
+        # Destructive boundary: the replacement content is fully prepared,
+        # so removing the previous version can no longer lose data to a
+        # parsing/embedding failure.
+        removed_chunks = _delete_existing_chunks_if_present(document_id)
+
+        try:
+            index_chunks(chunks, embeddings)
+        except Exception as error:
+            # Non-atomic window: old chunks are already gone. Log loudly,
+            # fail safely, and tell the client to retry — never pretend
+            # the replacement succeeded.
+            logger.exception(
+                "Re-indexing failed AFTER deleting %d old chunk(s) for "
+                "document_id=%s. The document is temporarily unindexed; "
+                "retrying the upload will restore it.",
+                removed_chunks,
+                document_id,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Document replacement failed during final indexing; "
+                    "please upload the document again."
+                ),
+            ) from error
     except HTTPException:
         raise
     except Exception as error:
@@ -128,7 +181,14 @@ def _ingest_pdf(temp_path: str, filename: str, document_id: str) -> tuple[int, i
 
 @router.post("/upload", response_model=UploadIngestionResponse)
 async def upload_document(file: UploadFile = File(...)) -> UploadIngestionResponse:
-    """Validate an uploaded PDF, then ingest, embed, and index it."""
+    """
+    Validate an uploaded PDF, then ingest, embed, and index it.
+
+    Uploading a filename that normalizes to an already-indexed
+    document_id atomically-replaces (best effort) the old representation:
+    the new content is fully prepared first, then old chunks are deleted,
+    then new chunks are indexed.
+    """
     filename = (file.filename or "").strip()
     if not filename:
         raise HTTPException(

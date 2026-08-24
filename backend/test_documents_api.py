@@ -1,5 +1,5 @@
-"""Tests for POST /api/documents/upload, GET /api/documents, and
-DELETE /api/documents/{document_id}."""
+"""Tests for POST /api/documents/upload (with replacement semantics),
+GET /api/documents, and DELETE /api/documents/{document_id}."""
 import os
 import shutil
 import sys
@@ -13,7 +13,7 @@ from langchain_core.documents import Document
 
 import app.vector_store as vector_store_module
 from app.main import app
-from app.vector_store import CHROMA_DIR, COLLECTION_NAME
+from app.vector_store import COLLECTION_NAME
 
 
 MINIMAL_PDF_CONTENT = (
@@ -58,32 +58,41 @@ def _temp_leftovers() -> set[str]:
 def test_valid_pdf_upload_ingests_and_indexes() -> bool:
     """A: A real repository PDF passes validation and is fully indexed."""
     assert REAL_PDF_PATH.exists(), f"Expected real PDF at {REAL_PDF_PATH}."
-    client = TestClient(app)
-    with open(REAL_PDF_PATH, "rb") as handle:
-        pdf_bytes = handle.read()
+    temp_dir, collection = _new_isolated_collection("rag_upload_new_")
+    try:
+        client = TestClient(app)
+        with open(REAL_PDF_PATH, "rb") as handle:
+            pdf_bytes = handle.read()
 
-    response = _upload_file(client, REAL_PDF_NAME, pdf_bytes)
+        # Patched BEFORE the upload so ingestion never touches chroma_db/.
+        with unittest.mock.patch.object(vector_store_module, "_collection", collection):
+            response = _upload_file(client, REAL_PDF_NAME, pdf_bytes)
 
-    assert response.status_code == 200, (
-        f"Expected HTTP 200, got {response.status_code}: {response.text}"
-    )
+        assert response.status_code == 200, (
+            f"Expected HTTP 200, got {response.status_code}: {response.text}"
+        )
 
-    body = response.json()
-    assert body["filename"] == REAL_PDF_NAME, "Expected original filename echoed."
-    assert body["status"] == "indexed", "Expected status 'indexed'."
-    assert body["pages"] > 0, "Expected at least one parsed page."
-    assert body["chunks"] > 0, "Expected at least one generated chunk."
-    assert body["document_id"], "Expected a document_id to be present."
+        body = response.json()
+        assert body["filename"] == REAL_PDF_NAME, "Expected original filename echoed."
+        assert body["status"] == "indexed", "Expected status 'indexed'."
+        assert body["pages"] > 0, "Expected at least one parsed page."
+        assert body["chunks"] > 0, "Expected at least one generated chunk."
+        assert body["document_id"], "Expected a document_id to be present."
 
-    document_id = body["document_id"]
-    assert "/" not in document_id and "\\" not in document_id, (
-        "document_id must not leak filesystem paths."
-    )
-    assert document_id == "employee_remote_work_policy", (
-        f"Unexpected deterministic document_id: {document_id}"
-    )
-    print("POST /api/documents/upload ->", body)
-    return True
+        document_id = body["document_id"]
+        assert "/" not in document_id and "\\" not in document_id, (
+            "document_id must not leak filesystem paths."
+        )
+        assert document_id == "employee_remote_work_policy", (
+            f"Unexpected deterministic document_id: {document_id}"
+        )
+        assert collection.count() == body["chunks"], (
+            "Indexed record count must match the reported chunk count."
+        )
+        print("POST /api/documents/upload ->", body)
+        return True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def test_txt_upload_rejected_without_ingestion() -> bool:
@@ -187,42 +196,46 @@ def test_corrupt_pdf_returns_safe_error_and_cleans_temp() -> bool:
 def test_duplicate_upload_is_idempotent() -> bool:
     """F2: Re-uploading the same PDF must not double the ChromaDB records."""
     assert REAL_PDF_PATH.exists(), f"Expected real PDF at {REAL_PDF_PATH}."
-    client = TestClient(app)
-    with open(REAL_PDF_PATH, "rb") as handle:
-        pdf_bytes = handle.read()
+    temp_dir, collection = _new_isolated_collection("rag_upload_dup_")
+    try:
+        client = TestClient(app)
+        with open(REAL_PDF_PATH, "rb") as handle:
+            pdf_bytes = handle.read()
 
-    first = _upload_file(client, REAL_PDF_NAME, pdf_bytes)
-    assert first.status_code == 200, f"First upload failed: {first.text}"
+        with unittest.mock.patch.object(vector_store_module, "_collection", collection):
+            first = _upload_file(client, REAL_PDF_NAME, pdf_bytes)
+            assert first.status_code == 200, f"First upload failed: {first.text}"
 
-    collection = chromadb.PersistentClient(path=CHROMA_DIR).get_or_create_collection(
-        name=COLLECTION_NAME,
-        metadata={"hnsw:space": "cosine"},
-    )
-    count_after_first = collection.count()
-    assert count_after_first > 0, "Expected records in the collection after indexing."
+            count_after_first = collection.count()
+            assert count_after_first > 0, (
+                "Expected records in the collection after indexing."
+            )
 
-    second = _upload_file(client, REAL_PDF_NAME, pdf_bytes)
-    assert second.status_code == 200, f"Second upload failed: {second.text}"
+            second = _upload_file(client, REAL_PDF_NAME, pdf_bytes)
+            assert second.status_code == 200, f"Second upload failed: {second.text}"
 
-    count_after_second = collection.count()
-    assert count_after_second == count_after_first, (
-        f"Re-upload changed record count from {count_after_first} to "
-        f"{count_after_second}; duplicates were created."
-    )
+            count_after_second = collection.count()
 
-    first_body = first.json()
-    second_body = second.json()
-    assert first_body["document_id"] == second_body["document_id"], (
-        "Same file must map to the same deterministic document_id."
-    )
-    assert first_body["chunks"] == second_body["chunks"], (
-        "Same file must produce the same chunk count."
-    )
-    print(
-        f"Duplicate upload idempotent: {count_after_second} records "
-        f"(unchanged after re-upload)."
-    )
-    return True
+        assert count_after_second == count_after_first, (
+            f"Re-upload changed record count from {count_after_first} to "
+            f"{count_after_second}; duplicates were created."
+        )
+
+        first_body = first.json()
+        second_body = second.json()
+        assert first_body["document_id"] == second_body["document_id"], (
+            "Same file must map to the same deterministic document_id."
+        )
+        assert first_body["chunks"] == second_body["chunks"], (
+            "Same file must produce the same chunk count."
+        )
+        print(
+            f"Duplicate upload idempotent: {count_after_second} records "
+            f"(unchanged after re-upload)."
+        )
+        return True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def test_docs_advertise_upload_endpoint() -> bool:
@@ -413,13 +426,16 @@ TARGET_CHUNK_COUNT = 9  # 4 legacy-style + 5 new-style records for the target
 SCENARIO_CHUNK_COUNT = TARGET_CHUNK_COUNT + 2  # plus 2 chunks of the other doc
 
 
-def _scenario_chunk(source: str, page: int,
-                    document_id: str | None = None) -> Document:
+def _scenario_chunk(source: str, page: int, document_id: str | None = None,
+                    text: str | None = None) -> Document:
     """Builds one chunk record, optionally stamped as a new-style upload."""
     metadata = {"source": source, "page": page}
     if document_id:
         metadata["document_id"] = document_id
-    return Document(page_content=f"Scenario text {source} p{page}", metadata=metadata)
+    return Document(
+        page_content=text or f"Scenario text {source} p{page}",
+        metadata=metadata,
+    )
 
 
 def _dummy_embedding() -> list[float]:
@@ -667,6 +683,349 @@ def test_docs_advertise_delete_endpoint() -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# POST /api/documents/upload — replacement semantics (Phase 7.9)
+#
+# Every test here patches app.vector_store._collection BEFORE seeding or
+# uploading anything, so ALL writes (seeds, ingests, deletions) hit an
+# isolated temporary collection. The real backend/chroma_db is never
+# touched by destructive tests.
+# ---------------------------------------------------------------------------
+
+LEAVE_PDF_NAME = "EMPLOYEE LEAVE OF ABSENCE POLICY.pdf"
+LEAVE_PDF_ID = "employee_leave_of_absence_policy"
+STALE_PAGE_BASE = 1000  # real PDFs have < 20 pages, so these IDs never collide
+STALE_TEXT_MARKER = "STALE VERSION CHUNK"
+
+
+def _seed_stale_version(collection, document_id: str, filename: str,
+                        count: int) -> None:
+    """
+    Indexes `count` obsolete v1 chunks for a document into an ISOLATED
+    collection, alternating legacy-style (absolute source, no document_id)
+    and new-style records. Page numbers start at STALE_PAGE_BASE so their
+    chunk IDs can never collide with a genuine upload of the real PDF.
+    """
+    absolute_source = str(PROJECT_ROOT / "documents" / filename)
+    for index in range(count):
+        page = STALE_PAGE_BASE + index
+        marker_text = f"{STALE_TEXT_MARKER} {document_id} #{index}"
+        if index % 2 == 0:
+            chunk = _scenario_chunk(absolute_source, page, text=marker_text)
+        else:
+            chunk = _scenario_chunk(
+                filename, page, document_id=document_id, text=marker_text,
+            )
+        vector_store_module.index_chunks([chunk], [_dummy_embedding()])
+
+
+def _collection_snapshot(collection) -> tuple[list, list, list]:
+    """Reads (ids, documents, metadatas) from the isolated collection."""
+    results = collection.get(include=["metadatas", "documents"])
+    return (
+        list(results.get("ids") or []),
+        list(results.get("documents") or []),
+        list(results.get("metadatas") or []),
+    )
+
+
+def _resolved_document_ids(metadatas: list) -> set:
+    return {
+        vector_store_module._resolve_record_document_id(meta or {})
+        for meta in metadatas
+    }
+
+
+def _read_pdf_bytes(pdf_name: str) -> bytes:
+    pdf_path = PROJECT_ROOT / "documents" / pdf_name
+    assert pdf_path.exists(), f"Expected fixture PDF at {pdf_path}."
+    with open(pdf_path, "rb") as handle:
+        return handle.read()
+
+
+def test_upload_new_document_indexes_fresh() -> bool:
+    """L1/A: Uploading a document_id that does not exist yet simply indexes
+    it; previously indexed documents remain untouched."""
+    temp_dir, collection = _new_isolated_collection("rag_replace_new_")
+    try:
+        api_client = TestClient(app)
+        leave_bytes = _read_pdf_bytes(LEAVE_PDF_NAME)
+
+        with unittest.mock.patch.object(vector_store_module, "_collection", collection):
+            # Seeded while patched: writes stay in the isolated collection.
+            vector_store_module.index_chunks(
+                [
+                    _scenario_chunk(str(PROJECT_ROOT / "documents" / OTHER_PDF_NAME), 0),
+                    _scenario_chunk(OTHER_PDF_NAME, 1, document_id=DELETE_OTHER_ID),
+                ],
+                [_dummy_embedding(), _dummy_embedding()],
+            )
+            assert collection.count() == 2, "Expected 2 seeded unrelated records."
+
+            with unittest.mock.patch("app.api.chat.answer_question") as llm_guard:
+                response = _upload_file(api_client, LEAVE_PDF_NAME, leave_bytes)
+                llm_guard.assert_not_called()
+
+            assert response.status_code == 200, (
+                f"Expected HTTP 200, got {response.status_code}: {response.text}"
+            )
+            body = response.json()
+            assert body["document_id"] == LEAVE_PDF_ID
+            assert body["status"] == "indexed"
+            assert body["pages"] > 0 and body["chunks"] > 0
+
+            _, _, metas = _collection_snapshot(collection)
+            assert _resolved_document_ids(metas) == {
+                DELETE_OTHER_ID, LEAVE_PDF_ID,
+            }, f"Unexpected document set after fresh upload: {_resolved_document_ids(metas)}"
+            handbook_count = sum(
+                1 for meta in metas
+                if vector_store_module._resolve_record_document_id(meta) == DELETE_OTHER_ID
+            )
+            leave_count = sum(
+                1 for meta in metas
+                if vector_store_module._resolve_record_document_id(meta) == LEAVE_PDF_ID
+            )
+            assert handbook_count == 2, "Unrelated document was modified."
+            assert leave_count == body["chunks"], (
+                f"Indexed {leave_count} records but API reported "
+                f"{body['chunks']} chunks."
+            )
+
+        print("Fresh upload ->", {
+            "document_id": body["document_id"],
+            "chunks": leave_count,
+            "handbook_intact": handbook_count == 2,
+        })
+        return True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_replacement_removes_stale_chunks_when_new_version_smaller() -> bool:
+    """L2/B (most important): a v1 seeded with MORE chunk records than the
+    replacement produces must end up with ONLY the new representation —
+    every unmatched stale ID removed."""
+    temp_dir, collection = _new_isolated_collection("rag_replace_smaller_")
+    try:
+        api_client = TestClient(app)
+        handbook_bytes = _read_pdf_bytes(OTHER_PDF_NAME)
+        stale_count = 45
+
+        with unittest.mock.patch.object(vector_store_module, "_collection", collection):
+            _seed_stale_version(collection, DELETE_OTHER_ID, OTHER_PDF_NAME, stale_count)
+            assert collection.count() == stale_count
+
+            with unittest.mock.patch("app.api.chat.answer_question") as llm_guard:
+                response = _upload_file(api_client, OTHER_PDF_NAME, handbook_bytes)
+                llm_guard.assert_not_called()
+
+            assert response.status_code == 200, (
+                f"Replacement upload failed: {response.status_code}: {response.text}"
+            )
+            body = response.json()
+            assert body["document_id"] == DELETE_OTHER_ID
+            assert body["status"] == "indexed"
+            assert body["chunks"] > 0
+            assert body["chunks"] < stale_count, (
+                f"Fixture broken: new version ({body['chunks']} chunks) is not "
+                f"smaller than the seeded stale one ({stale_count})."
+            )
+
+            _, docs, metas = _collection_snapshot(collection)
+            final_count = collection.count()
+            assert final_count == body["chunks"], (
+                f"Expected exactly {body['chunks']} records after replacement "
+                f"(the new version), got {final_count}; stale chunks survived."
+            )
+            assert _resolved_document_ids(metas) == {DELETE_OTHER_ID}
+
+            surviving_stale = [d for d in docs if d and STALE_TEXT_MARKER in d]
+            assert not surviving_stale, (
+                f"{len(surviving_stale)} stale chunk text(s) survived replacement."
+            )
+            high_pages = [
+                meta.get("page") for meta in metas
+                if (meta.get("page") or 0) >= STALE_PAGE_BASE
+            ]
+            assert not high_pages, (
+                f"Stale page numbers survived replacement: {high_pages[:5]}"
+            )
+
+        print("Replacement (fewer chunks) ->", {
+            "stale_records": stale_count,
+            "final_records": final_count,
+            "reported_chunks": body["chunks"],
+        })
+        return True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_replacement_swaps_content_for_same_document_id() -> bool:
+    """L3/C: Same document_id, different content -> the final ChromaDB
+    records correspond ONLY to the newly uploaded content."""
+    temp_dir, collection = _new_isolated_collection("rag_replace_content_")
+    try:
+        api_client = TestClient(app)
+        remote_bytes = _read_pdf_bytes(REAL_PDF_NAME)
+        stale_count = 5
+
+        with unittest.mock.patch.object(vector_store_module, "_collection", collection):
+            _seed_stale_version(collection, DELETE_TARGET_ID, REAL_PDF_NAME, stale_count)
+            assert collection.count() == stale_count
+
+            with unittest.mock.patch("app.api.chat.answer_question") as llm_guard:
+                response = _upload_file(api_client, REAL_PDF_NAME, remote_bytes)
+                llm_guard.assert_not_called()
+
+            assert response.status_code == 200, (
+                f"Replacement upload failed: {response.status_code}: {response.text}"
+            )
+            body = response.json()
+            assert body["document_id"] == DELETE_TARGET_ID
+            assert body["status"] == "indexed"
+            assert body["chunks"] > 0
+
+            _, docs, metas = _collection_snapshot(collection)
+            assert collection.count() == body["chunks"], (
+                f"Expected {body['chunks']} records after content swap, "
+                f"got {collection.count()}."
+            )
+            assert not [d for d in docs if d and STALE_TEXT_MARKER in d], (
+                "Stale content survived the replacement."
+            )
+            # Every surviving record was written by THIS upload: bare-filename
+            # source and explicit document_id stamped by the pipeline.
+            for meta in metas:
+                assert vector_store_module._resolve_record_document_id(meta) == DELETE_TARGET_ID
+                assert meta.get("source") == REAL_PDF_NAME, (
+                    f"Record kept a foreign source: {meta.get('source')!r}"
+                )
+                assert meta.get("document_id") == DELETE_TARGET_ID
+            non_empty_texts = [d for d in docs if d and d.strip()]
+            assert len(non_empty_texts) == len(docs), "Empty chunk text found."
+
+        print("Content swap ->", {
+            "stale_records": stale_count,
+            "final_records": len(docs),
+            "all_new_content": True,
+        })
+        return True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_processing_failure_preserves_existing_document() -> bool:
+    """L4/D: An embedding failure happens BEFORE any deletion, so the old
+    document must remain completely untouched."""
+    temp_dir, collection = _new_isolated_collection("rag_replace_prefail_")
+    try:
+        api_client = TestClient(app)
+        handbook_bytes = _read_pdf_bytes(OTHER_PDF_NAME)
+
+        with unittest.mock.patch.object(vector_store_module, "_collection", collection):
+            old_chunks = [
+                _scenario_chunk(
+                    OTHER_PDF_NAME, page, document_id=DELETE_OTHER_ID,
+                    text=f"OLD-KEPT handbook paragraph {page}",
+                )
+                for page in range(3)
+            ]
+            vector_store_module.index_chunks(
+                old_chunks, [_dummy_embedding()] * len(old_chunks),
+            )
+            ids_before, docs_before, _ = _collection_snapshot(collection)
+            assert len(ids_before) == 3
+
+            with unittest.mock.patch(
+                "app.api.documents.embed_texts",
+                side_effect=RuntimeError("embedding model exploded"),
+            ):
+                with unittest.mock.patch("app.api.chat.answer_question") as llm_guard:
+                    response = _upload_file(api_client, OTHER_PDF_NAME, handbook_bytes)
+                    llm_guard.assert_not_called()
+
+            assert response.status_code == 500, (
+                f"Expected HTTP 500 on processing failure, got {response.status_code}"
+            )
+            detail = response.json()["detail"]
+            assert detail == "Failed to process the uploaded PDF.", (
+                f"Expected the safe generic detail, got: {detail}"
+            )
+            assert "embedding model exploded" not in response.text, "Internal error leaked."
+
+            ids_after, docs_after, _ = _collection_snapshot(collection)
+            assert sorted(ids_after) == sorted(ids_before), "Chunk IDs changed."
+            assert sorted(docs_after) == sorted(docs_before), "Chunk texts changed."
+
+        print("Pre-deletion failure -> old document preserved:", len(ids_after), "records")
+        return True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_index_failure_after_deletion_leaves_safe_error_and_gap() -> bool:
+    """L5/E: If index_chunks fails AFTER the old chunks were deleted, the
+    API returns a safe 500 and the consistency gap is documented rather
+    than hidden: the old representation stays deleted until a retry."""
+    temp_dir, collection = _new_isolated_collection("rag_replace_postfail_")
+    try:
+        api_client = TestClient(app)
+        handbook_bytes = _read_pdf_bytes(OTHER_PDF_NAME)
+
+        with unittest.mock.patch.object(vector_store_module, "_collection", collection):
+            old_chunks = [
+                _scenario_chunk(
+                    OTHER_PDF_NAME, page, document_id=DELETE_OTHER_ID,
+                    text=f"OLD-GONE handbook paragraph {page}",
+                )
+                for page in range(4)
+            ]
+            vector_store_module.index_chunks(
+                old_chunks, [_dummy_embedding()] * len(old_chunks),
+            )
+            assert collection.count() == 4
+
+            # Patch only the pipeline's reference; seeding above used the
+            # real vector_store_module.index_chunks and already succeeded.
+            with unittest.mock.patch(
+                "app.api.documents.index_chunks",
+                side_effect=RuntimeError("simulated index explosion"),
+            ):
+                with unittest.mock.patch("app.api.chat.answer_question") as llm_guard:
+                    response = _upload_file(api_client, OTHER_PDF_NAME, handbook_bytes)
+                    llm_guard.assert_not_called()
+
+            assert response.status_code == 500, (
+                f"Expected HTTP 500 on indexing failure, got {response.status_code}"
+            )
+            detail = response.json()["detail"]
+            assert detail == (
+                "Document replacement failed during final indexing; "
+                "please upload the document again."
+            ), f"Expected the documented replacement failure detail, got: {detail}"
+            assert "simulated index explosion" not in response.text, "Internal error leaked."
+            assert "RuntimeError" not in response.text, "Exception class name leaked."
+
+            # DOCUMENTED LIMITATION: delete+index are not atomic across
+            # ChromaDB calls. Old chunks were removed before the failure,
+            # so the store temporarily holds no representation of this
+            # document until a successful retry.
+            _, docs_after, metas_after = _collection_snapshot(collection)
+            assert collection.count() == 0, (
+                f"Expected the documented post-deletion gap (no records); "
+                f"found {collection.count()}."
+            )
+            assert DELETE_OTHER_ID not in _resolved_document_ids(metas_after)
+
+        print("Post-deletion failure -> safe 500 returned; gap documented:",
+              "old representation removed, retry required.")
+        return True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     tests = [
         test_valid_pdf_upload_ingests_and_indexes,
@@ -688,6 +1047,11 @@ if __name__ == "__main__":
         test_delete_invalid_document_id_rejected_with_422,
         test_delete_unexpected_failure_returns_safe_500,
         test_docs_advertise_delete_endpoint,
+        test_upload_new_document_indexes_fresh,
+        test_replacement_removes_stale_chunks_when_new_version_smaller,
+        test_replacement_swaps_content_for_same_document_id,
+        test_processing_failure_preserves_existing_document,
+        test_index_failure_after_deletion_leaves_safe_error_and_gap,
     ]
     success = all(test() for test in tests)
     print("\nDocuments API tests complete." if success else "\nDocuments API tests FAILED.")
