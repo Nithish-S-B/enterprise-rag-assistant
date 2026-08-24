@@ -16,6 +16,15 @@ from .embeddings import embed_text
 COLLECTION_NAME = "employee_policies"
 CHROMA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_db")
 
+
+class DocumentNotFoundError(LookupError):
+    """
+    Raised when no indexed chunk resolves to the requested document_id.
+
+    Signals the API layer to return HTTP 404 without touching ChromaDB.
+    """
+
+
 # Persistent, disk-backed client and collection loaded once at import time.
 _client = chromadb.PersistentClient(path=CHROMA_DIR)
 _collection = _client.get_or_create_collection(
@@ -55,6 +64,22 @@ def _extract_filename(source: str) -> str:
     return os.path.basename(str(source).replace("\\", "/"))
 
 
+def _resolve_record_document_id(metadata: dict) -> str:
+    """
+    Resolves the logical document identity of a single chunk record.
+
+    Records written by newer uploads carry "document_id"; legacy records
+    do not, so their ID is re-derived from the source filename using the
+    same normalization as upload. Shared by listing and deletion so both
+    code paths always agree on which chunks belong to which document.
+    """
+    document_id = str(metadata.get("document_id") or "").strip()
+    if not document_id:
+        source = str(metadata.get("source", ""))
+        document_id = normalize_document_id(_extract_filename(source))
+    return document_id
+
+
 def list_documents() -> list[dict]:
     """
     Derives per-document summaries from the collection's chunk metadata.
@@ -75,11 +100,8 @@ def list_documents() -> list[dict]:
 
     groups: dict[str, dict] = {}
     for metadata in metadatas:
-        source = str(metadata.get("source", ""))
-        filename = _extract_filename(source)
-        document_id = str(metadata.get("document_id") or "").strip()
-        if not document_id:
-            document_id = normalize_document_id(filename)
+        filename = _extract_filename(str(metadata.get("source", "")))
+        document_id = _resolve_record_document_id(metadata)
 
         group = groups.setdefault(
             document_id,
@@ -101,6 +123,45 @@ def list_documents() -> list[dict]:
     ]
     documents.sort(key=lambda document: document["filename"])
     return documents
+
+
+def delete_document(document_id: str) -> int:
+    """
+    Removes every indexed chunk belonging to the requested document.
+
+    Identity resolution matches list_documents(): records with a
+    "document_id" metadata value use it directly; legacy records without
+    one are resolved from their source filename via
+    normalize_document_id(). Only records resolving to exactly the
+    requested ID are deleted, so unrelated documents are never touched.
+
+    Args:
+        document_id (str): The normalized identifier of the document.
+
+    Returns:
+        int: The number of chunk records deleted.
+
+    Raises:
+        DocumentNotFoundError: If no indexed chunk resolves to the
+            requested document_id (the collection is left unchanged).
+    """
+    requested_id = str(document_id or "").strip()
+    results = _collection.get(include=["metadatas"])
+    record_ids = results.get("ids") or []
+    metadatas = results.get("metadatas") or []
+
+    matching_ids = [
+        record_id
+        for record_id, metadata in zip(record_ids, metadatas)
+        if _resolve_record_document_id(metadata or {}) == requested_id
+    ]
+    if not matching_ids:
+        raise DocumentNotFoundError(
+            f"No indexed document matches document_id '{requested_id}'."
+        )
+
+    _collection.delete(ids=matching_ids)
+    return len(matching_ids)
 
 
 def index_chunks(chunks: list[Document], embeddings: list[list[float]]) -> int:

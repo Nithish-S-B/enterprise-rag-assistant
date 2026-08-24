@@ -4,13 +4,19 @@ import os
 import tempfile
 from typing import Literal
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Path, UploadFile
 from pydantic import BaseModel
 
 from ..chunker import chunk_documents
 from ..document_loader import load_pdf
 from ..embeddings import embed_texts
-from ..vector_store import index_chunks, list_documents, normalize_document_id
+from ..vector_store import (
+    DocumentNotFoundError,
+    delete_document,
+    index_chunks,
+    list_documents,
+    normalize_document_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +55,14 @@ class DocumentListResponse(BaseModel):
     documents: list[DocumentSummary]
     total_documents: int
     total_chunks: int
+
+
+class DocumentDeleteResponse(BaseModel):
+    """Result of successfully removing one document and all its chunks."""
+
+    document_id: str
+    deleted_chunks: int
+    status: Literal["deleted"]
 
 
 def _max_upload_bytes() -> int:
@@ -202,4 +216,43 @@ async def get_documents() -> DocumentListResponse:
         documents=summaries,
         total_documents=len(summaries),
         total_chunks=sum(document["chunks"] for document in summaries),
+    )
+
+
+@router.delete("/{document_id}", response_model=DocumentDeleteResponse)
+async def delete_existing_document(
+    document_id: str = Path(
+        ...,
+        description="Normalized identifier of the document to delete.",
+        min_length=1,
+        max_length=200,
+        pattern=r"^[a-z0-9_]+$",
+    ),
+) -> DocumentDeleteResponse:
+    """
+    Delete every indexed chunk belonging to the given document.
+
+    Delegates all ChromaDB work to the vector store; this route only
+    validates input and maps outcomes to typed responses or safe errors.
+    """
+    try:
+        deleted_chunks = delete_document(document_id)
+    except DocumentNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except Exception as error:
+        logger.exception("Deletion failed for document_id=%s.", document_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete the document.",
+        ) from error
+
+    logger.info(
+        "Deleted document_id=%s (%d chunks removed).",
+        document_id,
+        deleted_chunks,
+    )
+    return DocumentDeleteResponse(
+        document_id=document_id,
+        deleted_chunks=deleted_chunks,
+        status="deleted",
     )

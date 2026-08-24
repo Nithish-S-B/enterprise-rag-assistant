@@ -1,5 +1,7 @@
-"""Tests for POST /api/documents/upload and GET /api/documents."""
+"""Tests for POST /api/documents/upload, GET /api/documents, and
+DELETE /api/documents/{document_id}."""
 import os
+import shutil
 import sys
 import tempfile
 import unittest.mock
@@ -7,6 +9,7 @@ from pathlib import Path
 
 import chromadb
 from fastapi.testclient import TestClient
+from langchain_core.documents import Document
 
 import app.vector_store as vector_store_module
 from app.main import app
@@ -22,6 +25,7 @@ CORRUPT_PDF_CONTENT = b"%PDF-1.4\ncorrupt payload without xref or eof"
 
 UPLOAD_ENDPOINT = "/api/documents/upload"
 LIST_ENDPOINT = "/api/documents"
+DELETE_ENDPOINT = "/api/documents/{document_id}"
 TEMP_FILE_PREFIX = "rag_upload_"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -394,6 +398,275 @@ def test_docs_advertise_list_endpoint() -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# DELETE /api/documents/{document_id}
+#
+# Deletion tests run against isolated, temporary ChromaDB collections
+# (patching vector_store_module._collection) so the real chroma_db/ — and
+# its historical employee_remote_work_policy duplicates — is never mutated.
+# ---------------------------------------------------------------------------
+
+DELETE_TARGET_ID = "employee_remote_work_policy"
+DELETE_OTHER_ID = "employee_handbook"
+OTHER_PDF_NAME = "EMPLOYEE HANDBOOK.pdf"
+TARGET_CHUNK_COUNT = 9  # 4 legacy-style + 5 new-style records for the target
+SCENARIO_CHUNK_COUNT = TARGET_CHUNK_COUNT + 2  # plus 2 chunks of the other doc
+
+
+def _scenario_chunk(source: str, page: int,
+                    document_id: str | None = None) -> Document:
+    """Builds one chunk record, optionally stamped as a new-style upload."""
+    metadata = {"source": source, "page": page}
+    if document_id:
+        metadata["document_id"] = document_id
+    return Document(page_content=f"Scenario text {source} p{page}", metadata=metadata)
+
+
+def _dummy_embedding() -> list[float]:
+    return [0.5] * 384
+
+
+def _new_isolated_collection(prefix: str):
+    """Creates a throwaway disk-backed collection for deletion tests."""
+    temp_dir = tempfile.mkdtemp(prefix=prefix)
+    client = chromadb.PersistentClient(path=temp_dir)
+    collection = client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"},
+    )
+    return temp_dir, collection
+
+
+def _seed_deletion_scenario(collection) -> None:
+    """
+    Indexes two logical documents into an isolated collection:
+
+    - Target: 4 legacy chunks (absolute-path source, NO document_id)
+      + 5 new chunks (bare filename + document_id) -> 9 records that all
+      resolve to employee_remote_work_policy.
+    - Other: 1 legacy + 1 new chunk -> 2 records for employee_handbook.
+    """
+    legacy_target_source = str(PROJECT_ROOT / "documents" / REAL_PDF_NAME)
+    target_chunks = (
+        [_scenario_chunk(legacy_target_source, page) for page in range(4)]
+        + [
+            _scenario_chunk(REAL_PDF_NAME, page, document_id=DELETE_TARGET_ID)
+            for page in range(4, 9)
+        ]
+    )
+    other_chunks = [
+        _scenario_chunk(str(PROJECT_ROOT / "documents" / OTHER_PDF_NAME), 0),
+        _scenario_chunk(OTHER_PDF_NAME, 1, document_id=DELETE_OTHER_ID),
+    ]
+    for chunk in target_chunks + other_chunks:
+        vector_store_module.index_chunks([chunk], [_dummy_embedding()])
+
+
+def test_delete_existing_document_removes_every_chunk() -> bool:
+    """K1-K5: DELETE returns a typed summary, removes ALL chunks (legacy +
+    new) for the target only, vanishes from listing and raw ChromaDB,
+    leaves the unrelated document intact, and repeats yield 404."""
+    temp_dir, collection = _new_isolated_collection("rag_delete_scenario_")
+    try:
+        api_client = TestClient(app)
+        with unittest.mock.patch.object(vector_store_module, "_collection", collection):
+            # Seeding MUST run while patched so index_chunks writes to the
+            # isolated collection, never to the real chroma_db/.
+            _seed_deletion_scenario(collection)
+            assert collection.count() == SCENARIO_CHUNK_COUNT, (
+                f"Expected {SCENARIO_CHUNK_COUNT} seeded records, "
+                f"got {collection.count()}."
+            )
+
+            # K1: deleting an existing document succeeds with a summary.
+            response = api_client.delete(f"/api/documents/{DELETE_TARGET_ID}")
+            assert response.status_code == 200, (
+                f"Expected HTTP 200, got {response.status_code}: {response.text}"
+            )
+            body = response.json()
+            assert body["document_id"] == DELETE_TARGET_ID
+            assert body["status"] == "deleted", "Expected status 'deleted'."
+            assert body["deleted_chunks"] > 0, "Expected deleted_chunks > 0."
+            assert body["deleted_chunks"] == TARGET_CHUNK_COUNT, (
+                f"Expected all {TARGET_CHUNK_COUNT} target chunks deleted, "
+                f"got {body['deleted_chunks']}."
+            )
+
+            # K2: the deleted document no longer appears in the listing.
+            listed = api_client.get(LIST_ENDPOINT)
+            assert listed.status_code == 200, f"Listing failed: {listed.text}"
+            listed_ids = {
+                doc["document_id"] for doc in listed.json()["documents"]
+            }
+            assert DELETE_TARGET_ID not in listed_ids, (
+                "Deleted document still appears in GET /api/documents."
+            )
+
+            # K4: deleting the same document again must 404.
+            repeat = api_client.delete(f"/api/documents/{DELETE_TARGET_ID}")
+            assert repeat.status_code == 404, (
+                f"Expected HTTP 404 on re-delete, got {repeat.status_code}."
+            )
+
+        # K3: raw ChromaDB scan — nothing resolves to the deleted ID anymore.
+        remaining = collection.get(include=["metadatas"])
+        remaining_metas = remaining.get("metadatas") or []
+        surviving_ids = {
+            vector_store_module._resolve_record_document_id(meta or {})
+            for meta in remaining_metas
+        }
+        assert DELETE_TARGET_ID not in surviving_ids, (
+            "Chunk metadata still resolves to the deleted document_id."
+        )
+        assert collection.count() == SCENARIO_CHUNK_COUNT - TARGET_CHUNK_COUNT
+
+        # K5/K7: ONLY the unrelated document remains, fully intact.
+        assert surviving_ids == {DELETE_OTHER_ID}, (
+            f"Unexpected surviving documents: {surviving_ids}"
+        )
+        other_pages = sorted(
+            meta["page"] for meta in remaining_metas
+            if vector_store_module._resolve_record_document_id(meta) == DELETE_OTHER_ID
+        )
+        assert other_pages == [0, 1], f"Other doc chunks altered: {other_pages}"
+
+        print("DELETE existing ->", body)
+        print(f"ChromaDB after delete: {collection.count()} records remain "
+              f"(other document untouched).")
+        return True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_delete_missing_document_returns_404() -> bool:
+    """K6: Deleting a document_id with no indexed chunks returns 404."""
+    temp_dir, collection = _new_isolated_collection("rag_delete_404_")
+    try:
+        with unittest.mock.patch.object(vector_store_module, "_collection", collection):
+            vector_store_module.index_chunks(
+                [_scenario_chunk(OTHER_PDF_NAME, 0, document_id=DELETE_OTHER_ID)],
+                [_dummy_embedding()],
+            )
+            api_client = TestClient(app)
+            response = api_client.delete("/api/documents/employee_leave_of_absence_policy")
+
+        assert response.status_code == 404, (
+            f"Expected HTTP 404 for missing document, got {response.status_code}: "
+            f"{response.text}"
+        )
+        detail = response.json()["detail"]
+        assert isinstance(detail, str) and detail, "Expected a safe error detail."
+        print("DELETE missing -> 404:", detail)
+        return True
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_delete_identifies_legacy_and_new_records_via_mock() -> bool:
+    """K7: With mocked Chroma metadata mixing legacy records (absolute
+    source, no document_id) and new records (with document_id), deletion
+    must select BOTH sets and never touch another document."""
+    legacy_source = str(PROJECT_ROOT / "documents" / REAL_PDF_NAME)
+    record_ids = ["legacy#p0", "legacy#p1", "new#p2", "new#p3", "other#p0"]
+    fake_metadatas = [
+        {"source": legacy_source, "page": 0},
+        {"source": legacy_source, "page": 1},
+        {"source": REAL_PDF_NAME, "page": 2, "document_id": DELETE_TARGET_ID},
+        {"source": REAL_PDF_NAME, "page": 3, "document_id": DELETE_TARGET_ID},
+        {"source": "OTHER POLICY.pdf", "page": 0, "document_id": "other_policy"},
+    ]
+    mocked_collection = unittest.mock.MagicMock()
+    mocked_collection.get.return_value = {
+        "ids": record_ids,
+        "metadatas": fake_metadatas,
+    }
+
+    with unittest.mock.patch.object(
+        vector_store_module, "_collection", mocked_collection
+    ):
+        deleted = vector_store_module.delete_document(DELETE_TARGET_ID)
+
+    assert deleted == 4, f"Expected 4 chunks deleted (2 legacy + 2 new), got {deleted}."
+    mocked_collection.delete.assert_called_once()
+    removed_ids = mocked_collection.delete.call_args.kwargs["ids"]
+    assert sorted(removed_ids) == sorted(record_ids[:4]), (
+        f"Deletion selected the wrong chunk IDs: {removed_ids}"
+    )
+    assert "other#p0" not in removed_ids, "Unrelated document was selected for deletion."
+    print("Legacy+new mock delete removed IDs:", sorted(removed_ids))
+    return True
+
+
+def test_delete_invalid_document_id_rejected_with_422() -> bool:
+    """K8: Unsafe/invalid path input fails request validation with 422."""
+    client = TestClient(app)
+    invalid_ids = ["Employee Remote Work Policy", "UPPER_CASE_ID", "id-with-dash"]
+    for bad_id in invalid_ids:
+        response = client.delete(f"/api/documents/{bad_id}")
+        assert response.status_code == 422, (
+            f"Expected HTTP 422 for unsafe id {bad_id!r}, got "
+            f"{response.status_code}: {response.text}"
+        )
+    print(f"Unsafe ids rejected with 422: {invalid_ids}")
+    return True
+
+
+def test_delete_unexpected_failure_returns_safe_500() -> bool:
+    """K9: A ChromaDB outage surfaces as 500 with a safe generic message."""
+    broken_collection = unittest.mock.MagicMock()
+    broken_collection.get.side_effect = RuntimeError("simulated chroma outage")
+
+    with unittest.mock.patch.object(
+        vector_store_module, "_collection", broken_collection
+    ):
+        response = TestClient(app).delete(f"/api/documents/{DELETE_OTHER_ID}")
+
+    assert response.status_code == 500, (
+        f"Expected HTTP 500 on unexpected failure, got {response.status_code}"
+    )
+    detail = response.json()["detail"]
+    assert detail == "Failed to delete the document.", (
+        f"Expected a safe generic detail, got: {detail}"
+    )
+    assert "simulated chroma outage" not in response.text, "Internal error leaked."
+    assert "RuntimeError" not in response.text, "Exception class name leaked."
+    return True
+
+
+def test_docs_advertise_delete_endpoint() -> bool:
+    """K10: /openapi.json advertises DELETE /api/documents/{document_id}."""
+    client = TestClient(app)
+    openapi_response = client.get("/openapi.json")
+
+    assert openapi_response.status_code == 200, "Expected /openapi.json to work."
+    paths = openapi_response.json()["paths"]
+    assert "/api/documents/{document_id}" in paths, (
+        "Expected DELETE path in OpenAPI paths."
+    )
+    assert "delete" in paths["/api/documents/{document_id}"], (
+        "Expected DELETE method to be advertised."
+    )
+
+    schema_props = (
+        openapi_response.json()["components"]["schemas"]
+        ["DocumentDeleteResponse"]["properties"]
+    )
+    expected_fields = {"document_id", "deleted_chunks", "status"}
+    assert set(schema_props) == expected_fields, (
+        f"Expected typed delete fields in schema, got: {sorted(schema_props)}"
+    )
+    status_schema = schema_props["status"]
+    # Pydantic v2 renders Literal["deleted"] as {"const": "deleted"};
+    # accept either that or the equivalent single-value enum form.
+    status_value = status_schema.get("const", (status_schema.get("enum") or [None])[0])
+    assert status_value == "deleted", (
+        f"Expected Literal['deleted'] in schema, got: {status_schema}"
+    )
+
+    print("OpenAPI delete path advertised:", "/api/documents/{document_id}")
+    return True
+
+
 if __name__ == "__main__":
     tests = [
         test_valid_pdf_upload_ingests_and_indexes,
@@ -409,6 +682,12 @@ if __name__ == "__main__":
         test_list_documents_returns_summaries,
         test_legacy_and_new_records_merge_into_one_document,
         test_docs_advertise_list_endpoint,
+        test_delete_existing_document_removes_every_chunk,
+        test_delete_missing_document_returns_404,
+        test_delete_identifies_legacy_and_new_records_via_mock,
+        test_delete_invalid_document_id_rejected_with_422,
+        test_delete_unexpected_failure_returns_safe_500,
+        test_docs_advertise_delete_endpoint,
     ]
     success = all(test() for test in tests)
     print("\nDocuments API tests complete." if success else "\nDocuments API tests FAILED.")
