@@ -1,7 +1,6 @@
-"""Document upload endpoint: validate, ingest, embed, and index PDFs."""
+"""Document upload and listing endpoints for PDFs."""
 import logging
 import os
-import re
 import tempfile
 from typing import Literal
 
@@ -11,7 +10,7 @@ from pydantic import BaseModel
 from ..chunker import chunk_documents
 from ..document_loader import load_pdf
 from ..embeddings import embed_texts
-from ..vector_store import index_chunks
+from ..vector_store import index_chunks, list_documents, normalize_document_id
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +34,23 @@ class UploadIngestionResponse(BaseModel):
     status: Literal["indexed"]
 
 
+class DocumentSummary(BaseModel):
+    """Chunk-level summary of one indexed document."""
+
+    document_id: str
+    filename: str
+    pages: int
+    chunks: int
+
+
+class DocumentListResponse(BaseModel):
+    """All documents currently indexed in the vector store."""
+
+    documents: list[DocumentSummary]
+    total_documents: int
+    total_chunks: int
+
+
 def _max_upload_bytes() -> int:
     """Resolve the configured upload ceiling, falling back to the default."""
     raw_value = os.getenv("MAX_UPLOAD_SIZE_MB", str(DEFAULT_MAX_UPLOAD_SIZE_MB))
@@ -48,17 +64,6 @@ def _max_upload_bytes() -> int:
         )
         megabytes = DEFAULT_MAX_UPLOAD_SIZE_MB
     return max(1, megabytes) * BYTES_PER_MB
-
-
-def _build_document_id(filename: str) -> str:
-    """
-    Derives a stable, filesystem-safe identifier from the uploaded filename.
-
-    Example: "Employee Handbook.pdf" -> "employee_handbook"
-    """
-    stem = os.path.splitext(os.path.basename(filename))[0]
-    normalized = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_")
-    return normalized or "document"
 
 
 def _ingest_pdf(temp_path: str, filename: str, document_id: str) -> tuple[int, int]:
@@ -154,7 +159,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadIngestionRespon
             detail="File content does not look like a valid PDF document.",
         )
 
-    document_id = _build_document_id(filename)
+    document_id = normalize_document_id(filename)
     temp_path: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -186,4 +191,15 @@ async def upload_document(file: UploadFile = File(...)) -> UploadIngestionRespon
         pages=pages,
         chunks=chunk_count,
         status="indexed",
+    )
+
+
+@router.get("", response_model=DocumentListResponse)
+async def get_documents() -> DocumentListResponse:
+    """List all documents currently indexed in the vector store."""
+    summaries = list_documents()
+    return DocumentListResponse(
+        documents=summaries,
+        total_documents=len(summaries),
+        total_chunks=sum(document["chunks"] for document in summaries),
     )

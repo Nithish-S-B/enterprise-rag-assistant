@@ -6,6 +6,7 @@ collection. Each chunk becomes exactly one record containing a
 deterministic ID, the chunk text, its embedding, and its metadata.
 """
 import os
+import re
 
 import chromadb
 from langchain_core.documents import Document
@@ -32,6 +33,74 @@ def build_chunk_id(chunk: Document, position: int) -> str:
     safe_source = os.path.splitext(os.path.basename(source))[0].replace(" ", "_")
     page = chunk.metadata.get("page", -1)
     return f"{safe_source}#page{page}#chunk{position}"
+
+
+def normalize_document_id(filename: str) -> str:
+    """
+    Derives a stable, filesystem-safe identifier from a document filename.
+
+    Shared by upload (to stamp chunk metadata) and listing (to derive IDs
+    for legacy chunks that were stored without one), so both code paths
+    always produce identical IDs.
+
+    Example: "Employee Handbook.pdf" -> "employee_handbook"
+    """
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    normalized = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_")
+    return normalized or "document"
+
+
+def _extract_filename(source: str) -> str:
+    """Extracts the bare filename from an absolute path or plain filename."""
+    return os.path.basename(str(source).replace("\\", "/"))
+
+
+def list_documents() -> list[dict]:
+    """
+    Derives per-document summaries from the collection's chunk metadata.
+
+    Read-only: only metadata is read (no documents or embeddings).
+    Records written by newer uploads carry "document_id"; legacy records
+    do not, so their ID is re-derived from the source filename using the
+    same normalization as upload. Both styles therefore merge into the
+    same logical document.
+
+    Returns:
+        list[dict]: One summary per document, each with "document_id",
+            "filename", "pages" (count of distinct parsed pages), and
+            "chunks" (number of indexed records), sorted by filename.
+    """
+    results = _collection.get(include=["metadatas"])
+    metadatas = results.get("metadatas") or []
+
+    groups: dict[str, dict] = {}
+    for metadata in metadatas:
+        source = str(metadata.get("source", ""))
+        filename = _extract_filename(source)
+        document_id = str(metadata.get("document_id") or "").strip()
+        if not document_id:
+            document_id = normalize_document_id(filename)
+
+        group = groups.setdefault(
+            document_id,
+            {"filename": filename, "pages": set(), "chunks": 0},
+        )
+        page = metadata.get("page")
+        if page is not None:
+            group["pages"].add(page)
+        group["chunks"] += 1
+
+    documents = [
+        {
+            "document_id": document_id,
+            "filename": group["filename"],
+            "pages": len(group["pages"]),
+            "chunks": group["chunks"],
+        }
+        for document_id, group in groups.items()
+    ]
+    documents.sort(key=lambda document: document["filename"])
+    return documents
 
 
 def index_chunks(chunks: list[Document], embeddings: list[list[float]]) -> int:

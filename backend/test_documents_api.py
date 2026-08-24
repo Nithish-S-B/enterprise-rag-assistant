@@ -1,4 +1,4 @@
-"""Tests for POST /api/documents/upload: validation, ingestion, and indexing."""
+"""Tests for POST /api/documents/upload and GET /api/documents."""
 import os
 import sys
 import tempfile
@@ -8,6 +8,7 @@ from pathlib import Path
 import chromadb
 from fastapi.testclient import TestClient
 
+import app.vector_store as vector_store_module
 from app.main import app
 from app.vector_store import CHROMA_DIR, COLLECTION_NAME
 
@@ -20,11 +21,18 @@ MINIMAL_PDF_CONTENT = (
 CORRUPT_PDF_CONTENT = b"%PDF-1.4\ncorrupt payload without xref or eof"
 
 UPLOAD_ENDPOINT = "/api/documents/upload"
+LIST_ENDPOINT = "/api/documents"
 TEMP_FILE_PREFIX = "rag_upload_"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REAL_PDF_NAME = "EMPLOYEE REMOTE WORK POLICY.pdf"
 REAL_PDF_PATH = PROJECT_ROOT / "documents" / REAL_PDF_NAME
+
+EXPECTED_DOCUMENT_IDS = {
+    "employee_handbook",
+    "employee_leave_of_absence_policy",
+    "employee_remote_work_policy",
+}
 
 
 def _upload_file(client: TestClient, filename: str, content: bytes,
@@ -239,6 +247,153 @@ def test_docs_advertise_upload_endpoint() -> bool:
     return True
 
 
+def test_list_documents_returns_summaries() -> bool:
+    """H: GET /api/documents returns typed, path-free, sorted summaries."""
+    client = TestClient(app)
+
+    # N: the listing endpoint must never reach OpenRouter/LLM code.
+    with unittest.mock.patch("app.api.chat.answer_question") as llm_guard:
+        response = client.get(LIST_ENDPOINT)
+        llm_guard.assert_not_called()
+
+    assert response.status_code == 200, (
+        f"Expected HTTP 200 from GET {LIST_ENDPOINT}, got "
+        f"{response.status_code}: {response.text}"
+    )
+
+    body = response.json()
+    for key in ("documents", "total_documents", "total_chunks"):
+        assert key in body, f"Expected '{key}' in response body."
+
+    documents = body["documents"]
+    assert isinstance(documents, list) and documents, (
+        "Expected at least one indexed document."
+    )
+
+    document_ids: set[str] = set()
+    filenames: list[str] = []
+    total_chunks = 0
+    for document in documents:
+        for field in ("document_id", "filename", "pages", "chunks"):
+            assert field in document, f"Expected '{field}' on each document."
+        filename = document["filename"]
+        document_id = document["document_id"]
+
+        # D: no absolute paths may leak into filenames.
+        assert "D:\\" not in filename and "D:/" not in filename, (
+            f"Filename leaks an absolute path: {filename}"
+        )
+        assert str(PROJECT_ROOT) not in filename, (
+            f"Filename leaks the workspace path: {filename}"
+        )
+        assert "/" not in filename and "\\" not in filename, (
+            f"Filename must be a bare name, got: {filename}"
+        )
+
+        # E: IDs are normalized and path-free.
+        assert "/" not in document_id and "\\" not in document_id, (
+            f"document_id must be path-free: {document_id}"
+        )
+        assert document_id == document_id.lower(), (
+            f"document_id must be lowercase: {document_id}"
+        )
+        allowed = set("abcdefghijklmnopqrstuvwxyz0123456789_")
+        assert set(document_id) <= allowed and not document_id.startswith("_"), (
+            f"document_id is not normalized: {document_id}"
+        )
+        assert document["pages"] > 0, f"Expected pages >= 1 for {document_id}."
+        assert document["chunks"] > 0, f"Expected chunks >= 1 for {document_id}."
+
+        # H: no duplicate logical documents.
+        assert document_id not in document_ids, (
+            f"Duplicate document_id returned: {document_id}"
+        )
+        document_ids.add(document_id)
+        filenames.append(filename)
+        total_chunks += document["chunks"]
+
+    # F: deterministic ordering by filename.
+    assert filenames == sorted(filenames), (
+        f"Documents are not sorted by filename: {filenames}"
+    )
+
+    # I/J: totals are derived from the per-document summaries.
+    assert body["total_documents"] == len(documents), (
+        "total_documents must equal len(documents)."
+    )
+    assert body["total_chunks"] == total_chunks, (
+        "total_chunks must equal the sum of per-document chunk counts."
+    )
+
+    # Current fixture: all three policy PDFs are indexed.
+    missing = EXPECTED_DOCUMENT_IDS - document_ids
+    assert not missing, f"Expected indexed documents missing: {sorted(missing)}"
+
+    print(f"GET {LIST_ENDPOINT} ->", {
+        "total_documents": body["total_documents"],
+        "total_chunks": body["total_chunks"],
+    })
+    return True
+
+
+def test_legacy_and_new_records_merge_into_one_document() -> bool:
+    """I: Legacy chunks (absolute source, no document_id) merge with new
+    uploads (bare filename + document_id) into ONE logical document."""
+    legacy_source = str(PROJECT_ROOT / "documents" / REAL_PDF_NAME)
+    fake_metadatas = [
+        {"source": legacy_source, "page": page}
+        for page in (0, 2, 4)
+    ] + [
+        {"source": REAL_PDF_NAME, "page": page,
+         "document_id": "employee_remote_work_policy"}
+        for page in (5, 9)
+    ]
+    mocked_collection = unittest.mock.MagicMock()
+    mocked_collection.get.return_value = {"metadatas": fake_metadatas}
+
+    with unittest.mock.patch.object(
+        vector_store_module, "_collection", mocked_collection
+    ):
+        documents = vector_store_module.list_documents()
+
+    remote_work = [
+        doc for doc in documents
+        if doc["document_id"] == "employee_remote_work_policy"
+    ]
+    assert len(remote_work) == 1, (
+        f"Legacy and new records did not merge into one document: {remote_work}"
+    )
+    merged = remote_work[0]
+    assert merged["filename"] == REAL_PDF_NAME, (
+        f"Expected the bare filename, got: {merged['filename']}"
+    )
+    # Unique-page counting: pages {0,2,4} ∪ {5,9} -> 5 distinct pages,
+    # while max(page)+1 would wrongly report 10 due to gaps.
+    assert merged["pages"] == 5, (
+        f"Expected 5 unique pages, got: {merged['pages']}"
+    )
+    assert merged["chunks"] == 5, (
+        f"Expected 5 merged chunk records, got: {merged['chunks']}"
+    )
+    mocked_collection.get.assert_called_once_with(include=["metadatas"])
+    print("Legacy + new records merged:", merged)
+    return True
+
+
+def test_docs_advertise_list_endpoint() -> bool:
+    """J: /openapi.json advertises GET /api/documents."""
+    client = TestClient(app)
+    openapi_response = client.get("/openapi.json")
+
+    assert openapi_response.status_code == 200, "Expected /openapi.json to work."
+    paths = openapi_response.json()["paths"]
+    assert "/api/documents" in paths, "Expected /api/documents in OpenAPI paths."
+    assert "get" in paths["/api/documents"], (
+        "Expected GET /api/documents to be advertised."
+    )
+    return True
+
+
 if __name__ == "__main__":
     tests = [
         test_valid_pdf_upload_ingests_and_indexes,
@@ -251,6 +406,9 @@ if __name__ == "__main__":
         test_corrupt_pdf_returns_safe_error_and_cleans_temp,
         test_duplicate_upload_is_idempotent,
         test_docs_advertise_upload_endpoint,
+        test_list_documents_returns_summaries,
+        test_legacy_and_new_records_merge_into_one_document,
+        test_docs_advertise_list_endpoint,
     ]
     success = all(test() for test in tests)
     print("\nDocuments API tests complete." if success else "\nDocuments API tests FAILED.")
