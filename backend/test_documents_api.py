@@ -214,7 +214,7 @@ def test_corrupt_pdf_returns_safe_error_and_cleans_temp() -> bool:
     assert body["message"] == "An internal server error occurred.", (
         f"Expected a safe generic error message, got: {body.get('message')}"
     )
-    assert body.get("request_id") is None, "request_id should be null."
+    assert isinstance(body.get("request_id"), str), "request_id must be a UUID string."
     assert _temp_leftovers() == before, (
         "Temporary PDF files were left behind after failed ingestion."
     )
@@ -605,7 +605,7 @@ def test_delete_missing_document_returns_404() -> bool:
         assert body["message"] == "Document not found.", (
             f"Expected safe 'Document not found.' message, got: {body.get('message')}"
         )
-        assert body.get("request_id") is None, "request_id should be null."
+        assert isinstance(body.get("request_id"), str), "request_id must be a UUID string."
         assert "employee_leave_of_absence_policy" not in response.text, (
             "User-supplied document_id must not be reflected in the response."
         )

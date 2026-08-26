@@ -13,6 +13,7 @@ from .api.chat import router as chat_router
 from .api.documents import router as documents_router
 from .api.errors import register_error_handlers
 from .api.health import router as health_router
+from .middleware.request_id import RequestIDMiddleware
 
 # Load environment variables
 load_dotenv()
@@ -45,6 +46,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Request-ID middleware (Step 7.10.2)
+app.add_middleware(RequestIDMiddleware)
 
 # Global error-response contract (Step 7.10.1)
 register_error_handlers(app)

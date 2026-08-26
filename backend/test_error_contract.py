@@ -1,11 +1,11 @@
-"""Tests for the global error-response contract (Step 7.10.1).
+"""Tests for the global error-response contract (Step 7.10.1 + 7.10.2).
 
 Every application-level error must use the uniform ErrorResponse shape::
 
     {
         "error_type": "...",
         "message": "...",
-        "request_id": null
+        "request_id": "..."     # UUID4, populated by RequestIDMiddleware
     }
 
 These tests verify the contract across all endpoints and error categories
@@ -13,6 +13,7 @@ without calling the real LLM provider (provider calls are mocked).
 """
 import sys
 import unittest.mock
+import uuid
 
 from fastapi.testclient import TestClient
 
@@ -36,9 +37,11 @@ def _assert_error_shape(body: dict, expected_keys: frozenset[str] = frozenset({"
     assert isinstance(body["message"], str) and body["message"], (
         f"message must be a non-empty string, got: {body['message']!r}"
     )
-    assert body["request_id"] is None, (
-        f"request_id must be null in Step 7.10.1, got: {body['request_id']!r}"
+    # Step 7.10.2: request_id is now a UUID4 string (not null).
+    assert isinstance(body["request_id"], str), (
+        f"request_id must be a string, got: {body['request_id']!r}"
     )
+    uuid.UUID(body["request_id"], version=4)  # raises ValueError if invalid
 
 
 # ---------------------------------------------------------------------------

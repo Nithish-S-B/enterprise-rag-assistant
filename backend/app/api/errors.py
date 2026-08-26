@@ -5,7 +5,7 @@ Every application-level error returned by the API uses the same shape::
     {
         "error_type": "...",
         "message": "...",
-        "request_id": null      # populated by Step 7.10.2 middleware
+        "request_id": "..."     # populated by RequestIDMiddleware
     }
 
 Three FastAPI exception handlers are registered to enforce this contract
@@ -102,12 +102,14 @@ async def http_exception_handler(
 
     error_type = _resolve_error_type(status_code)
     message = _resolve_message(status_code, raw_detail)
+    request_id = getattr(request.state, "request_id", None)
 
     return JSONResponse(
         status_code=status_code,
         content=ErrorResponse(
             error_type=error_type,
             message=message,
+            request_id=request_id,
         ).model_dump(),
     )
 
@@ -120,11 +122,13 @@ async def request_validation_exception_handler(
     Returns a uniform 422 + validation_error response.  The raw field-level
     error structure from Pydantic is *never* exposed to the client.
     """
+    request_id = getattr(request.state, "request_id", None)
     return JSONResponse(
         status_code=422,
         content=ErrorResponse(
             error_type="validation_error",
             message="Request validation failed.",
+            request_id=request_id,
         ).model_dump(),
     )
 
@@ -137,16 +141,19 @@ async def unhandled_exception_handler(
     Logs the full traceback server-side and returns a safe 500 to the
     client.  No internal details are leaked.
     """
+    request_id = getattr(request.state, "request_id", None)
     logger.exception(
-        "Unhandled exception on %s %s",
+        "Unhandled exception on %s %s [request_id=%s]",
         request.method,
         request.url.path,
+        request_id,
     )
     return JSONResponse(
         status_code=500,
         content=ErrorResponse(
             error_type="internal_error",
             message="An internal server error occurred.",
+            request_id=request_id,
         ).model_dump(),
     )
 
