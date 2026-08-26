@@ -33,16 +33,31 @@ app = FastAPI(
     version="0.1.0"
 )
 
-# Configure CORS
-origins = [
-    "http://localhost",
-    "http://localhost:3000",
-    "http://localhost:8000",
+# ---------------------------------------------------------------------------
+# CORS – configurable origins via CORS_ORIGINS environment variable.
+#
+# Format: comma-separated list of origin URLs, whitespace is stripped,
+# empty values are ignored.
+#
+# Examples:
+#   CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+#   CORS_ORIGINS=https://app.example.com
+#
+# The default covers common local development frontends.
+# allow_credentials=True is kept so that browser-based auth flows work;
+# this also means we must never use "*" as an origin.
+# ---------------------------------------------------------------------------
+_CORS_DEFAULT = "http://localhost:3000,http://localhost:5173"
+_cors_raw = os.getenv("CORS_ORIGINS", _CORS_DEFAULT)
+cors_origins = [
+    origin.strip()
+    for origin in _cors_raw.split(",")
+    if origin.strip()
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
