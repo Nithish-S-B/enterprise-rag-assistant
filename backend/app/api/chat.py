@@ -44,13 +44,9 @@ def chat(request: ChatRequest) -> ChatResponse:
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except RuntimeError as error:
-        logger.exception("LLM provider failure while answering question.")
         raise HTTPException(
             status_code=503,
             detail="Language model provider is currently unavailable.",
         ) from error
-    except Exception as error:
-        logger.exception("Unexpected failure while answering question.")
-        raise HTTPException(status_code=500, detail="Internal server error.") from error
 
     return ChatResponse(answer=result["answer"], citations=result["citations"])

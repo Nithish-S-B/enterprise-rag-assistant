@@ -117,63 +117,50 @@ def _ingest_pdf(temp_path: str, filename: str, document_id: str) -> tuple[int, i
         tuple[int, int]: (page_count, chunk_count)
 
     Raises:
-        HTTPException: With a safe, client-facing message when parsing,
-            chunking, embedding, deletion, or indexing fails.
+        HTTPException: When post-deletion re-indexing fails (logged,
+            safe message, tells client to retry).  All other pipeline
+            failures propagate to the global exception handler.
     """
+    pages = load_pdf(temp_path)
+    if not pages:
+        raise ValueError("The PDF contains no readable pages.")
+
+    chunks = chunk_documents(pages)
+    if not chunks:
+        raise ValueError("The PDF contains no extractable text to index.")
+
+    # Index under the original filename so chunk IDs are deterministic
+    # across uploads (re-indexing replaces same-ID records).
+    for chunk in chunks:
+        chunk.metadata["source"] = filename
+        chunk.metadata["document_id"] = document_id
+
+    texts = [chunk.page_content for chunk in chunks]
+    embeddings = embed_texts(texts)
+
+    # Destructive boundary: the replacement content is fully prepared,
+    # so removing the previous version can no longer lose data to a
+    # parsing/embedding failure.
+    _delete_existing_chunks_if_present(document_id)
+
     try:
-        pages = load_pdf(temp_path)
-        if not pages:
-            raise ValueError("The PDF contains no readable pages.")
-
-        chunks = chunk_documents(pages)
-        if not chunks:
-            raise ValueError("The PDF contains no extractable text to index.")
-
-        # Index under the original filename so chunk IDs are deterministic
-        # across uploads (re-indexing replaces same-ID records).
-        for chunk in chunks:
-            chunk.metadata["source"] = filename
-            chunk.metadata["document_id"] = document_id
-
-        texts = [chunk.page_content for chunk in chunks]
-        embeddings = embed_texts(texts)
-
-        # Destructive boundary: the replacement content is fully prepared,
-        # so removing the previous version can no longer lose data to a
-        # parsing/embedding failure.
-        removed_chunks = _delete_existing_chunks_if_present(document_id)
-
-        try:
-            index_chunks(chunks, embeddings)
-        except Exception as error:
-            # Non-atomic window: old chunks are already gone. Log loudly,
-            # fail safely, and tell the client to retry — never pretend
-            # the replacement succeeded.
-            logger.exception(
-                "Re-indexing failed AFTER deleting %d old chunk(s) for "
-                "document_id=%s. The document is temporarily unindexed; "
-                "retrying the upload will restore it.",
-                removed_chunks,
-                document_id,
-            )
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Document replacement failed during final indexing; "
-                    "please upload the document again."
-                ),
-            ) from error
-    except HTTPException:
-        raise
+        index_chunks(chunks, embeddings)
     except Exception as error:
+        # Non-atomic window: old chunks are already gone. Log loudly,
+        # fail safely, and tell the client to retry — never pretend
+        # the replacement succeeded.
         logger.exception(
-            "Ingestion failed for uploaded PDF '%s' (document_id=%s).",
-            filename,
+            "Re-indexing failed after deleting old chunks for "
+            "document_id=%s. The document is temporarily unindexed; "
+            "retrying the upload will restore it.",
             document_id,
         )
         raise HTTPException(
             status_code=500,
-            detail="Failed to process the uploaded PDF.",
+            detail=(
+                "Document replacement failed during final indexing; "
+                "please upload the document again."
+            ),
         ) from error
 
     return len(pages), len(chunks)
@@ -297,14 +284,8 @@ async def delete_existing_document(
     """
     try:
         deleted_chunks = delete_document(document_id)
-    except DocumentNotFoundError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except Exception as error:
-        logger.exception("Deletion failed for document_id=%s.", document_id)
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to delete the document.",
-        ) from error
+    except DocumentNotFoundError:
+        raise HTTPException(status_code=404, detail="Document not found.") from None
 
     logger.info(
         "Deleted document_id=%s (%d chunks removed).",

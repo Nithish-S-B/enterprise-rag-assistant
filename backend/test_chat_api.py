@@ -40,6 +40,13 @@ def test_chat_rejects_missing_question() -> bool:
     assert response.status_code == 422, (
         f"Expected HTTP 422 for missing question, got {response.status_code}"
     )
+    body = response.json()
+    assert body["error_type"] == "validation_error", (
+        f"Expected error_type 'validation_error', got: {body.get('error_type')}"
+    )
+    assert body["message"] == "Request validation failed.", (
+        f"Expected safe validation message, got: {body.get('message')}"
+    )
     return True
 
 
@@ -49,6 +56,10 @@ def test_chat_rejects_whitespace_question() -> bool:
 
     assert response.status_code == 422, (
         f"Expected HTTP 422 for whitespace-only question, got {response.status_code}"
+    )
+    body = response.json()
+    assert body["error_type"] == "validation_error", (
+        f"Expected error_type 'validation_error', got: {body.get('error_type')}"
     )
     return True
 
@@ -62,6 +73,10 @@ def test_chat_rejects_invalid_final_k() -> bool:
 
     assert response.status_code == 422, (
         f"Expected HTTP 422 for final_k=0, got {response.status_code}"
+    )
+    body = response.json()
+    assert body["error_type"] == "validation_error", (
+        f"Expected error_type 'validation_error', got: {body.get('error_type')}"
     )
     return True
 

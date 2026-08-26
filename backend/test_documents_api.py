@@ -104,6 +104,10 @@ def test_txt_upload_rejected_without_ingestion() -> bool:
     assert response.status_code == 415, (
         f"Expected HTTP 415 for .txt upload, got {response.status_code}: {response.text}"
     )
+    body = response.json()
+    assert body["error_type"] == "unsupported_media_type", (
+        f"Expected error_type 'unsupported_media_type', got: {body.get('error_type')}"
+    )
     spy_loader.assert_not_called(), "Ingestion must not run for invalid extensions."
     return True
 
@@ -116,6 +120,10 @@ def test_missing_file_rejected() -> bool:
     assert response.status_code == 422, (
         f"Expected HTTP 422 for missing file, got {response.status_code}"
     )
+    body = response.json()
+    assert body["error_type"] == "validation_error", (
+        f"Expected error_type 'validation_error', got: {body.get('error_type')}"
+    )
     return True
 
 
@@ -127,6 +135,10 @@ def test_blank_filename_rejected() -> bool:
     assert response.status_code == 422, (
         f"Expected HTTP 422 for blank filename, got {response.status_code}: {response.text}"
     )
+    body = response.json()
+    assert body["error_type"] == "validation_error", (
+        f"Expected error_type 'validation_error', got: {body.get('error_type')}"
+    )
     return True
 
 
@@ -137,6 +149,10 @@ def test_empty_file_rejected() -> bool:
 
     assert response.status_code == 400, (
         f"Expected HTTP 400 for empty upload, got {response.status_code}: {response.text}"
+    )
+    body = response.json()
+    assert body["error_type"] == "bad_request", (
+        f"Expected error_type 'bad_request', got: {body.get('error_type')}"
     )
     return True
 
@@ -154,6 +170,10 @@ def test_oversized_file_rejected() -> bool:
             f"Expected HTTP 413 for oversized upload, got "
             f"{response.status_code}: {response.text[:200]}"
         )
+        body = response.json()
+        assert body["error_type"] == "bad_request", (
+            f"Expected error_type 'bad_request', got: {body.get('error_type')}"
+        )
     finally:
         if previous_limit is None:
             os.environ.pop("MAX_UPLOAD_SIZE_MB", None)
@@ -170,12 +190,16 @@ def test_pdf_extension_with_fake_content_rejected() -> bool:
     assert response.status_code == 415, (
         f"Expected HTTP 415 for fake PDF content, got {response.status_code}"
     )
+    body = response.json()
+    assert body["error_type"] == "unsupported_media_type", (
+        f"Expected error_type 'unsupported_media_type', got: {body.get('error_type')}"
+    )
     return True
 
 
 def test_corrupt_pdf_returns_safe_error_and_cleans_temp() -> bool:
     """F1: Signed-but-corrupt PDF yields a safe error and leaves no temp file."""
-    client = TestClient(app)
+    client = TestClient(app, raise_server_exceptions=False)
     before = _temp_leftovers()
 
     response = _upload_file(client, "corrupt.pdf", CORRUPT_PDF_CONTENT)
@@ -183,10 +207,14 @@ def test_corrupt_pdf_returns_safe_error_and_cleans_temp() -> bool:
     assert response.status_code >= 400, (
         f"Expected an error status for corrupt PDF, got {response.status_code}"
     )
-    detail = response.json()["detail"]
-    assert detail == "Failed to process the uploaded PDF.", (
-        f"Expected a safe generic error detail, got: {detail}"
+    body = response.json()
+    assert body["error_type"] == "internal_error", (
+        f"Expected error_type 'internal_error', got: {body.get('error_type')}"
     )
+    assert body["message"] == "An internal server error occurred.", (
+        f"Expected a safe generic error message, got: {body.get('message')}"
+    )
+    assert body.get("request_id") is None, "request_id should be null."
     assert _temp_leftovers() == before, (
         "Temporary PDF files were left behind after failed ingestion."
     )
@@ -570,9 +598,18 @@ def test_delete_missing_document_returns_404() -> bool:
             f"Expected HTTP 404 for missing document, got {response.status_code}: "
             f"{response.text}"
         )
-        detail = response.json()["detail"]
-        assert isinstance(detail, str) and detail, "Expected a safe error detail."
-        print("DELETE missing -> 404:", detail)
+        body = response.json()
+        assert body["error_type"] == "not_found", (
+            f"Expected error_type 'not_found', got: {body.get('error_type')}"
+        )
+        assert body["message"] == "Document not found.", (
+            f"Expected safe 'Document not found.' message, got: {body.get('message')}"
+        )
+        assert body.get("request_id") is None, "request_id should be null."
+        assert "employee_leave_of_absence_policy" not in response.text, (
+            "User-supplied document_id must not be reflected in the response."
+        )
+        print("DELETE missing -> 404:", body["message"])
         return True
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -623,6 +660,10 @@ def test_delete_invalid_document_id_rejected_with_422() -> bool:
             f"Expected HTTP 422 for unsafe id {bad_id!r}, got "
             f"{response.status_code}: {response.text}"
         )
+        body = response.json()
+        assert body["error_type"] == "validation_error", (
+            f"Expected error_type 'validation_error', got: {body.get('error_type')}"
+        )
     print(f"Unsafe ids rejected with 422: {invalid_ids}")
     return True
 
@@ -635,14 +676,17 @@ def test_delete_unexpected_failure_returns_safe_500() -> bool:
     with unittest.mock.patch.object(
         vector_store_module, "_collection", broken_collection
     ):
-        response = TestClient(app).delete(f"/api/documents/{DELETE_OTHER_ID}")
+            response = TestClient(app, raise_server_exceptions=False).delete(f"/api/documents/{DELETE_OTHER_ID}")
 
     assert response.status_code == 500, (
         f"Expected HTTP 500 on unexpected failure, got {response.status_code}"
     )
-    detail = response.json()["detail"]
-    assert detail == "Failed to delete the document.", (
-        f"Expected a safe generic detail, got: {detail}"
+    body = response.json()
+    assert body["error_type"] == "internal_error", (
+        f"Expected error_type 'internal_error', got: {body.get('error_type')}"
+    )
+    assert body["message"] == "An internal server error occurred.", (
+        f"Expected safe generic message, got: {body.get('message')}"
     )
     assert "simulated chroma outage" not in response.text, "Internal error leaked."
     assert "RuntimeError" not in response.text, "Exception class name leaked."
@@ -921,7 +965,7 @@ def test_processing_failure_preserves_existing_document() -> bool:
     document must remain completely untouched."""
     temp_dir, collection = _new_isolated_collection("rag_replace_prefail_")
     try:
-        api_client = TestClient(app)
+        api_client = TestClient(app, raise_server_exceptions=False)
         handbook_bytes = _read_pdf_bytes(OTHER_PDF_NAME)
 
         with unittest.mock.patch.object(vector_store_module, "_collection", collection):
@@ -949,9 +993,12 @@ def test_processing_failure_preserves_existing_document() -> bool:
             assert response.status_code == 500, (
                 f"Expected HTTP 500 on processing failure, got {response.status_code}"
             )
-            detail = response.json()["detail"]
-            assert detail == "Failed to process the uploaded PDF.", (
-                f"Expected the safe generic detail, got: {detail}"
+            body = response.json()
+            assert body["error_type"] == "internal_error", (
+                f"Expected error_type 'internal_error', got: {body.get('error_type')}"
+            )
+            assert body["message"] == "An internal server error occurred.", (
+                f"Expected the safe generic message, got: {body.get('message')}"
             )
             assert "embedding model exploded" not in response.text, "Internal error leaked."
 
@@ -1000,11 +1047,14 @@ def test_index_failure_after_deletion_leaves_safe_error_and_gap() -> bool:
             assert response.status_code == 500, (
                 f"Expected HTTP 500 on indexing failure, got {response.status_code}"
             )
-            detail = response.json()["detail"]
-            assert detail == (
+            body = response.json()
+            assert body["error_type"] == "internal_error", (
+                f"Expected error_type 'internal_error', got: {body.get('error_type')}"
+            )
+            assert body["message"] == (
                 "Document replacement failed during final indexing; "
                 "please upload the document again."
-            ), f"Expected the documented replacement failure detail, got: {detail}"
+            ), f"Expected the documented replacement failure message, got: {body.get('message')}"
             assert "simulated index explosion" not in response.text, "Internal error leaked."
             assert "RuntimeError" not in response.text, "Exception class name leaked."
 

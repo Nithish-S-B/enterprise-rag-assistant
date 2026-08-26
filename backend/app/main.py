@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from .api.chat import router as chat_router
 from .api.documents import router as documents_router
+from .api.errors import register_error_handlers
 from .api.health import router as health_router
 
 # Load environment variables
@@ -44,6 +45,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Global error-response contract (Step 7.10.1)
+register_error_handlers(app)
 
 # Pydantic models for API responses
 class WelcomeResponse(BaseModel):
