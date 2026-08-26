@@ -57,7 +57,7 @@ async def readiness_check() -> ReadyResponse:
 def _check_vector_store() -> None:
     """Verify the ChromaDB collection can be read."""
     try:
-        from app.vector_store import _collection
+        from ..vector_store import _collection
         _collection.count()
     except Exception as exc:
         raise HTTPException(
@@ -69,7 +69,7 @@ def _check_vector_store() -> None:
 def _check_embedding_model() -> None:
     """Verify the embedding model is loaded."""
     try:
-        from app.embeddings import _model
+        from ..embeddings import _model
         if _model is None:
             raise RuntimeError("Model object is None")
     except Exception as exc:

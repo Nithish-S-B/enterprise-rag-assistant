@@ -3,6 +3,7 @@ Main FastAPI application for Enterprise RAG Assistant
 """
 import logging
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -16,8 +17,8 @@ from .api.health import router as health_router
 from .middleware.request_id import RequestIDMiddleware
 from .middleware.request_logging import RequestLoggingMiddleware
 
-# Load environment variables
-load_dotenv()
+# Load environment variables – explicit path so this works regardless of CWD.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # Configure logging
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -98,7 +99,7 @@ async def get_config():
     return {
         "debug": os.getenv("DEBUG", "False"),
         "log_level": os.getenv("LOG_LEVEL", "INFO"),
-        "llm_model": os.getenv("LLM_MODEL", "gpt-3.5-turbo"),
+        "llm_model": os.getenv("OPENROUTER_MODEL"),
         "max_tokens": os.getenv("LLM_MAX_TOKENS", "2048"),
     }
 
@@ -107,7 +108,7 @@ async def get_config():
 async def startup_event():
     logger.info("Application startup initiated")
     logger.info(f"Debug mode: {os.getenv('DEBUG', 'False')}")
-    logger.info(f"LLM Model: {os.getenv('LLM_MODEL', 'Not configured')}")
+    logger.info(f"LLM Model: {os.getenv('OPENROUTER_MODEL', 'Not configured')}")
 
 # Shutdown event
 @app.on_event("shutdown")
