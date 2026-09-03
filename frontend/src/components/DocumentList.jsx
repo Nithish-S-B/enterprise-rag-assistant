@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { getDocuments } from '../services/api'
 import DocumentCard from './DocumentCard'
 
-function DocumentList({ refreshKey = 0, onDeleteSuccess }) {
+function DocumentList({ refreshKey = 0, onDeleteSuccess, onDocumentsLoaded }) {
   const [data, setData] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -15,7 +15,10 @@ function DocumentList({ refreshKey = 0, onDeleteSuccess }) {
 
     getDocuments()
       .then((documents) => {
-        if (isMounted) setData(documents)
+        if (isMounted) {
+          setData(documents)
+          onDocumentsLoaded?.(documents?.total_documents ?? documents?.documents?.length ?? 0)
+        }
       })
       .catch((requestError) => {
         if (isMounted) setError(requestError)

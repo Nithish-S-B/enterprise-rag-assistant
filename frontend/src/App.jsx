@@ -10,6 +10,7 @@ function App() {
   const [documentRefreshKey, setDocumentRefreshKey] = useState(0)
   const [theme, setTheme] = useState(() => localStorage.getItem('enterprise-rag-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
   const [systemStatus, setSystemStatus] = useState('Checking status...')
+  const [documentCount, setDocumentCount] = useState(null)
   const refreshDocuments = () => setDocumentRefreshKey((key) => key + 1)
 
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('enterprise-rag-theme', theme) }, [theme])
@@ -20,8 +21,8 @@ function App() {
     <main className="app-shell">
       <Header theme={theme} systemStatus={systemStatus} onThemeToggle={() => setTheme((current) => current === 'light' ? 'dark' : 'light')} />
       <section className="workspace" aria-label="Assistant workspace">
-        <div className="documents-area" id="documents"><UploadDocument onUploadSuccess={refreshDocuments} /><DocumentList refreshKey={documentRefreshKey} onDeleteSuccess={refreshDocuments} /></div>
-        <div id="chat"><ChatPanel /></div>
+        <div className="documents-area" id="documents"><UploadDocument onUploadSuccess={refreshDocuments} /><DocumentList refreshKey={documentRefreshKey} onDeleteSuccess={refreshDocuments} onDocumentsLoaded={setDocumentCount} /></div>
+        <div id="chat"><ChatPanel documentCount={documentCount ?? 0} /></div>
       </section>
     </main>
   </div>

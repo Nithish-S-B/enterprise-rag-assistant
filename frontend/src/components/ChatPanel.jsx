@@ -2,8 +2,8 @@ import { useState } from 'react'
 import { sendChat } from '../services/api'
 import ChatMessage from './ChatMessage'
 
-function ChatPanel() {
-  const suggestions = ["What is the company's remote work policy?", 'How many vacation days are employees entitled to?', 'What are the key guidelines in the employee handbook?', 'Explain the leave of absence policy.']
+function ChatPanel({ documentCount = 0 }) {
+  const suggestions = ['Summarize the key points from my documents.', 'What are the most important policies or requirements?', 'What actions or responsibilities are mentioned?', 'What should I know from these documents?']
   const [question, setQuestion] = useState('')
   const [messages, setMessages] = useState([])
   const [isThinking, setIsThinking] = useState(false)
@@ -53,7 +53,7 @@ function ChatPanel() {
         </div>
       </div>
       <div className="conversation" aria-live="polite">
-        {!messages.length && !isThinking && <div className="chat-empty"><img src="/logo.png" alt="" /><h3>Ask anything about your documents</h3><p>Get accurate, grounded answers with citations from your enterprise knowledge base.</p><div className="suggestions">{suggestions.map((suggestion) => <button type="button" key={suggestion} onClick={() => setQuestion(suggestion)}>{suggestion}<span>→</span></button>)}</div></div>}
+        {!messages.length && !isThinking && <div className="chat-empty"><img src="/logo.png" alt="" /><h3>Ask anything about your documents</h3><p>Get accurate, grounded answers with citations from your enterprise knowledge base.</p>{documentCount > 0 ? <div className="suggestions">{suggestions.map((suggestion) => <button type="button" key={suggestion} onClick={() => setQuestion(suggestion)}>{suggestion}<span>→</span></button>)}</div> : <div className="no-documents"><strong>No documents are indexed yet.</strong><span>Upload a PDF document to start asking grounded questions.</span></div>}</div>}
         {messages.map((message) => <ChatMessage key={message.id} message={message} />)}
         {isThinking && <p className="thinking" role="status">Thinking...</p>}
       </div>
