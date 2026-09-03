@@ -1,4 +1,5 @@
 import { API_BASE_URL } from './services/api'
+import DocumentList from './components/DocumentList'
 
 const apiBaseUrl = API_BASE_URL
 
@@ -12,10 +13,7 @@ function App() {
       </header>
 
       <section className="workspace" aria-label="Assistant workspace">
-        <article className="placeholder-card">
-          <h2>Documents</h2>
-          <p>Document management will be available here.</p>
-        </article>
+        <DocumentList />
         <article className="placeholder-card">
           <h2>Chat</h2>
           <p>Ask questions about your documents here.</p>
