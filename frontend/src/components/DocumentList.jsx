@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { getDocuments } from '../services/api'
 import DocumentCard from './DocumentCard'
 
-function DocumentList({ refreshKey = 0 }) {
+function DocumentList({ refreshKey = 0, onDeleteSuccess }) {
   const [data, setData] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -59,7 +59,7 @@ function DocumentList({ refreshKey = 0 }) {
         <p className="empty-state">No documents have been indexed yet.</p>
       ) : (
         <div className="document-grid">
-          {documents.map((document) => <DocumentCard key={document.document_id} document={document} />)}
+          {documents.map((document) => <DocumentCard key={document.document_id} document={document} onDeleteSuccess={onDeleteSuccess} />)}
         </div>
       )}
     </section>

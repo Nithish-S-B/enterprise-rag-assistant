@@ -8,6 +8,7 @@ const apiBaseUrl = API_BASE_URL
 
 function App() {
   const [documentRefreshKey, setDocumentRefreshKey] = useState(0)
+  const refreshDocuments = () => setDocumentRefreshKey((key) => key + 1)
 
   return (
     <main className="app-shell">
@@ -19,8 +20,8 @@ function App() {
 
       <section className="workspace" aria-label="Assistant workspace">
         <div className="documents-area">
-          <UploadDocument onUploadSuccess={() => setDocumentRefreshKey((key) => key + 1)} />
-          <DocumentList refreshKey={documentRefreshKey} />
+          <UploadDocument onUploadSuccess={refreshDocuments} />
+          <DocumentList refreshKey={documentRefreshKey} onDeleteSuccess={refreshDocuments} />
         </div>
         <ChatPanel />
       </section>

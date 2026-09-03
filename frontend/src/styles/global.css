@@ -40,6 +40,13 @@ button:disabled, input:disabled { cursor: not-allowed; opacity: 0.6; }
 .document-stats div { display: grid; gap: 3px; }
 .document-stats dt { color: #60708d; font-size: 0.78rem; }
 .document-stats dd { margin: 0; font-weight: 700; }
+.delete-button { margin-top: 20px; color: #fff; background: #a34343; }
+.delete-confirmation { margin-top: 20px; padding-top: 16px; border-top: 1px solid #e3e9f2; }
+.delete-confirmation p { margin: 0 0 12px; font-weight: 700; }
+.delete-confirmation button { margin-right: 8px; }
+.delete-confirmation button:not(.delete-button) { color: #172033; background: #e8edf5; }
+.delete-success { color: #315d45; font-size: 0.85rem; }
+.delete-error { overflow-wrap: anywhere; color: #a34343; font-size: 0.85rem; }
 .empty-state { color: #60708d; }
 .chat-panel { max-width: 820px; width: 100%; justify-self: center; }
 .conversation { display: grid; gap: 16px; min-height: 120px; margin-bottom: 24px; }
