@@ -2,13 +2,16 @@ import { useEffect, useState } from 'react'
 import { getDocuments } from '../services/api'
 import DocumentCard from './DocumentCard'
 
-function DocumentList() {
+function DocumentList({ refreshKey = 0 }) {
   const [data, setData] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState(null)
 
   useEffect(() => {
     let isMounted = true
+
+    setIsLoading(true)
+    setError(null)
 
     getDocuments()
       .then((documents) => {
@@ -22,7 +25,7 @@ function DocumentList() {
       })
 
     return () => { isMounted = false }
-  }, [])
+  }, [refreshKey])
 
   if (isLoading) return <section className="content-card"><h2>Documents</h2><p role="status">Loading indexed documents...</p></section>
 

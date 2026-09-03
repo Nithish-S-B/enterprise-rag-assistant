@@ -1,9 +1,13 @@
+import { useState } from 'react'
 import { API_BASE_URL } from './services/api'
 import DocumentList from './components/DocumentList'
+import UploadDocument from './components/UploadDocument'
 
 const apiBaseUrl = API_BASE_URL
 
 function App() {
+  const [documentRefreshKey, setDocumentRefreshKey] = useState(0)
+
   return (
     <main className="app-shell">
       <header className="app-header">
@@ -13,7 +17,10 @@ function App() {
       </header>
 
       <section className="workspace" aria-label="Assistant workspace">
-        <DocumentList />
+        <div className="documents-area">
+          <UploadDocument onUploadSuccess={() => setDocumentRefreshKey((key) => key + 1)} />
+          <DocumentList refreshKey={documentRefreshKey} />
+        </div>
         <article className="placeholder-card">
           <h2>Chat</h2>
           <p>Ask questions about your documents here.</p>
