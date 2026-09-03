@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { API_BASE_URL } from './services/api'
 import DocumentList from './components/DocumentList'
 import UploadDocument from './components/UploadDocument'
+import ChatPanel from './components/ChatPanel'
 
 const apiBaseUrl = API_BASE_URL
 
@@ -21,10 +22,7 @@ function App() {
           <UploadDocument onUploadSuccess={() => setDocumentRefreshKey((key) => key + 1)} />
           <DocumentList refreshKey={documentRefreshKey} />
         </div>
-        <article className="placeholder-card">
-          <h2>Chat</h2>
-          <p>Ask questions about your documents here.</p>
-        </article>
+        <ChatPanel />
       </section>
     </main>
   )
