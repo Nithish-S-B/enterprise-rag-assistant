@@ -43,15 +43,16 @@ function DocumentList({ refreshKey = 0, onDeleteSuccess }) {
   const documents = data?.documents || []
 
   return (
+    <>
+    <section className="content-card knowledge-stats" aria-labelledby="knowledge-heading">
+      <div className="section-heading"><div><p className="section-kicker">Knowledge base</p><h2 id="knowledge-heading">Indexed Knowledge</h2></div></div>
+      <div className="summary" aria-label="Document totals"><span><strong>{data?.total_documents ?? documents.length}</strong>Indexed Documents</span><span><strong>{data?.total_chunks ?? 0}</strong>Total Chunks</span></div>
+    </section>
     <section className="content-card documents-section" aria-labelledby="documents-heading">
       <div className="section-heading">
         <div>
           <p className="section-kicker">Indexed knowledge</p>
           <h2 id="documents-heading">Documents</h2>
-        </div>
-        <div className="summary" aria-label="Document totals">
-          <span><strong>{data?.total_documents ?? documents.length}</strong> indexed documents</span>
-          <span><strong>{data?.total_chunks ?? 0}</strong> total chunks</span>
         </div>
       </div>
 
@@ -63,6 +64,7 @@ function DocumentList({ refreshKey = 0, onDeleteSuccess }) {
         </div>
       )}
     </section>
+    </>
   )
 }
 

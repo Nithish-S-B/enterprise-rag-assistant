@@ -40,8 +40,10 @@ function UploadDocument({ onUploadSuccess }) {
 
   return (
     <form className="upload-panel" onSubmit={handleSubmit}>
-      <div>
-        <label htmlFor="document-upload">Add a PDF document</label>
+      <div className="upload-dropzone">
+        <span className="upload-icon" aria-hidden="true">↑</span>
+        <label htmlFor="document-upload">Upload PDF Document</label>
+        <p>Drag and drop your PDF here<br />or click to browse files</p>
         <input
           id="document-upload"
           type="file"
@@ -49,10 +51,11 @@ function UploadDocument({ onUploadSuccess }) {
           onChange={handleFileChange}
           disabled={isUploading}
         />
+        <label className="choose-file-button" htmlFor="document-upload">Choose PDF File</label>
+        <small>PDF only</small>
+        {file && <strong className="selected-file">{file.name}</strong>}
       </div>
-      <button type="submit" disabled={isUploading}>
-        {isUploading ? 'Indexing...' : 'Upload PDF'}
-      </button>
+      <button className="upload-button" type="submit" disabled={isUploading || !file}>{isUploading ? 'Indexing...' : 'Upload PDF'}</button>
       <div className="upload-status" aria-live="polite">
         {status?.type === 'loading' && <p role="status">{status.message} This may take a few seconds.</p>}
         {status?.type === 'success' && (

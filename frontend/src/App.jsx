@@ -1,32 +1,29 @@
-import { useState } from 'react'
-import { API_BASE_URL } from './services/api'
+import { useEffect, useState } from 'react'
+import { getHealth, getReadiness } from './services/api'
 import DocumentList from './components/DocumentList'
 import UploadDocument from './components/UploadDocument'
 import ChatPanel from './components/ChatPanel'
-
-const apiBaseUrl = API_BASE_URL
+import Sidebar from './components/Sidebar'
+import Header from './components/Header'
 
 function App() {
   const [documentRefreshKey, setDocumentRefreshKey] = useState(0)
+  const [theme, setTheme] = useState(() => localStorage.getItem('enterprise-rag-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
+  const [systemStatus, setSystemStatus] = useState('Checking status...')
   const refreshDocuments = () => setDocumentRefreshKey((key) => key + 1)
 
-  return (
-    <main className="app-shell">
-      <header className="app-header">
-        <p className="eyebrow">Enterprise knowledge workspace</p>
-        <h1>Enterprise RAG Assistant</h1>
-        <p className="backend-status">Backend: {apiBaseUrl}</p>
-      </header>
+  useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('enterprise-rag-theme', theme) }, [theme])
+  useEffect(() => { Promise.all([getHealth(), getReadiness()]).then(() => setSystemStatus('Ready')).catch(() => setSystemStatus('Backend unavailable')) }, [])
 
+  return <div className="app-layout">
+    <Sidebar systemStatus={systemStatus} />
+    <main className="app-shell">
+      <Header theme={theme} systemStatus={systemStatus} onThemeToggle={() => setTheme((current) => current === 'light' ? 'dark' : 'light')} />
       <section className="workspace" aria-label="Assistant workspace">
-        <div className="documents-area">
-          <UploadDocument onUploadSuccess={refreshDocuments} />
-          <DocumentList refreshKey={documentRefreshKey} onDeleteSuccess={refreshDocuments} />
-        </div>
-        <ChatPanel />
+        <div className="documents-area" id="documents"><UploadDocument onUploadSuccess={refreshDocuments} /><DocumentList refreshKey={documentRefreshKey} onDeleteSuccess={refreshDocuments} /></div>
+        <div id="chat"><ChatPanel /></div>
       </section>
     </main>
-  )
+  </div>
 }
-
 export default App
